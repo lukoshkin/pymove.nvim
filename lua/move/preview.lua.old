@@ -1,0 +1,1270 @@
+local api = vim.api
+local fn = vim.fn
+local Path = require "plenary.path"
+local filesystem = require "move.filesystem"
+local refactor = require "move.refactor"
+local utils = require "move.utils"
+
+local M = {}
+
+---@class ChangePreview
+---@field file string File path
+---@field line_num integer Line number of the import
+---@field old_import string Original import statement
+---@field new_import string New import statement
+---@field context_before string[] Lines before the change
+---@field context_after string[] Lines after the change
+---@field status "pending"|"accepted"|"declined"
+---@field buffer_line integer Line in preview buffer where change starts
+---@field node_range table Treesitter node range for precise updating
+
+---@class PreviewState
+---@field changes ChangePreview[] All changes to preview
+---@field current_index integer Current change being viewed (1-indexed)
+---@field bufnr integer Preview buffer number
+---@field winid integer Preview window ID
+---@field old_name string Source module path
+---@field new_name string Destination module path
+---@field project_root string Project root directory
+---@field use_git boolean Whether to use git mv
+---@field namespace integer Extmark namespace
+---@field show_help boolean Whether to show detailed help
+---@field truncated boolean? Whether file list was truncated
+---@field total_files integer? Total number of files found
+
+local function get_log()
+  return require("plenary.log").new {
+    plugin = "pymove-preview",
+    use_console = true,
+  }
+end
+
+---Setup custom highlight groups for preview buffer
+local function setup_highlights()
+  -- Section headers and separators
+  api.nvim_set_hl(0, "PyMoveHeader", { fg = "#89b4fa", bold = true }) -- Blue
+  api.nvim_set_hl(0, "PyMoveSeparator", { fg = "#585b70" }) -- Gray
+  api.nvim_set_hl(0, "PyMoveFileOperation", { fg = "#f9e2af", bold = true }) -- Yellow
+
+  -- Import changes
+  api.nvim_set_hl(0, "PyMoveOldImport", { fg = "#f38ba8", bg = "#3e2b35" }) -- Red background
+  api.nvim_set_hl(0, "PyMoveNewImport", { fg = "#a6e3a1", bg = "#2b3328" }) -- Green background
+
+  -- Status indicators
+  api.nvim_set_hl(0, "PyMoveAccepted", { fg = "#a6e3a1", bold = true }) -- Green
+  api.nvim_set_hl(0, "PyMoveDeclined", { fg = "#f38ba8", bold = true }) -- Red
+  api.nvim_set_hl(0, "PyMovePending", { fg = "#cdd6f4" }) -- White
+
+  -- Context lines
+  api.nvim_set_hl(0, "PyMoveContext", { fg = "#6c7086" }) -- Dim gray
+end
+
+---Create a floating window with X% screen size
+---@return integer bufnr
+---@return integer winid
+local function create_floating_window()
+  local width = math.floor(vim.o.columns * 0.7)
+  local height = math.floor(vim.o.lines * 0.7)
+  local row = math.floor((vim.o.lines - height) / 2)
+  local col = math.floor((vim.o.columns - width) / 2)
+
+  local bufnr = api.nvim_create_buf(false, true)
+  vim.bo[bufnr].bufhidden = "wipe"
+  vim.bo[bufnr].buftype = "nofile"
+  vim.bo[bufnr].swapfile = false
+
+  -- Disable syntax to prevent it from interfering with our highlights
+  vim.bo[bufnr].syntax = "off"
+
+  local opts = {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = "minimal",
+    border = "rounded",
+    title = " PyMove Preview ",
+    title_pos = "center",
+  }
+
+  local winid = api.nvim_open_win(bufnr, true, opts)
+  vim.wo[winid].wrap = false
+  vim.wo[winid].cursorline = true
+
+  -- Disable syntax in window as well
+  vim.cmd "setlocal syntax=off"
+
+  return bufnr, winid
+end
+
+---Create a loading progress window
+---@return integer bufnr
+---@return integer winid
+local function create_loading_window()
+  local width = 60
+  local height = 5
+  local row = math.floor((vim.o.lines - height) / 2)
+  local col = math.floor((vim.o.columns - width) / 2)
+
+  local bufnr = api.nvim_create_buf(false, true)
+  vim.bo[bufnr].bufhidden = "wipe"
+  vim.bo[bufnr].buftype = "nofile"
+  vim.bo[bufnr].modifiable = false
+
+  local opts = {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = "minimal",
+    border = "rounded",
+    title = " Processing Files ",
+    title_pos = "center",
+  }
+
+  local winid = api.nvim_open_win(bufnr, false, opts)
+  return bufnr, winid
+end
+
+---Update loading window with progress
+---@param bufnr integer Buffer number
+---@param current integer Current file index
+---@param total integer Total files
+---@param file string? Current file being processed
+local function update_loading_progress(bufnr, current, total, file)
+  local percent = math.floor((current / total) * 100)
+  local bar_width = 50
+  local filled = math.floor((current / total) * bar_width)
+  local bar = string.rep("█", filled)
+    .. string.rep("░", bar_width - filled)
+
+  local lines = {
+    string.format("Processing files: %d/%d (%d%%)", current, total, percent),
+    bar,
+    "",
+    file and string.format("Current: %s", vim.fn.fnamemodify(file, ":t"))
+      or "",
+  }
+
+  vim.bo[bufnr].modifiable = true
+  api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  vim.bo[bufnr].modifiable = false
+  vim.cmd "redraw"
+end
+
+---Cache for treesitter queries to avoid recompilation
+local query_cache = {}
+
+---Get or create cached treesitter query
+---@param lang string Language name
+---@param query_string string Query string
+---@return vim.treesitter.Query
+local function get_cached_query(lang, query_string)
+  local cache_key = lang .. ":" .. query_string
+  if not query_cache[cache_key] then
+    query_cache[cache_key] = vim.treesitter.query.parse(lang, query_string)
+  end
+  return query_cache[cache_key]
+end
+
+---Process a single file for import changes
+---@param file string File path
+---@param old_dotted string Old import path
+---@param new_dotted string New import path
+---@param project_root string Project root
+---@param context_lines integer Number of context lines
+---@return ChangePreview[] changes
+local function process_file_changes(
+  file,
+  old_dotted,
+  new_dotted,
+  project_root,
+  context_lines
+)
+  local log = get_log()
+  local changes = {}
+
+  local bufnr = fn.bufadd(file)
+  fn.bufload(bufnr)
+
+  local success, parser = pcall(vim.treesitter.get_parser, bufnr, "python")
+  if not success then
+    log.warn("Failed to get parser for file: " .. file)
+    return changes
+  end
+
+  local trees = parser:parse()
+  if not trees or #trees == 0 then
+    log.warn("Failed to parse file: " .. file)
+    return changes
+  end
+
+  local tree = trees[1]
+  local root = tree:root()
+  local query_string = [[
+    (import_from_statement
+      module_name: (dotted_name) @module_name)
+    (import_statement
+      (dotted_name) @module_name)
+  ]]
+  local query_obj = get_cached_query("python", query_string)
+
+  for id, node, metadata in query_obj:iter_captures(root, bufnr) do
+    if node then
+      local capture_name = query_obj.captures[id]
+      if capture_name == "module_name" then
+        local success, name = pcall(vim.treesitter.get_node_text, node, bufnr)
+        if not success then
+          goto continue_node
+        end
+
+        -- Resolve relative imports
+        if name:find "^%." then
+          local rel_path = Path:new(file):make_relative(project_root)
+          name = utils.absolute_dotted_path(rel_path, name)
+        end
+
+        -- Check if this import matches
+        if name:find("^" .. old_dotted) then
+          local new_import = name:gsub("^" .. old_dotted, new_dotted)
+          local start_row, start_col, end_row, end_col = node:range()
+
+          -- Get context lines
+          local total_lines = api.nvim_buf_line_count(bufnr)
+          local ctx_start = math.max(0, start_row - context_lines)
+          local ctx_end = math.min(total_lines, end_row + context_lines + 1)
+
+          local context_before =
+            api.nvim_buf_get_lines(bufnr, ctx_start, start_row, false)
+          local context_after =
+            api.nvim_buf_get_lines(bufnr, end_row + 1, ctx_end, false)
+
+          table.insert(changes, {
+            file = file,
+            line_num = start_row + 1, -- 1-indexed for display
+            old_import = name,
+            new_import = new_import,
+            context_before = context_before,
+            context_after = context_after,
+            status = "pending",
+            buffer_line = 0, -- Will be set when building buffer
+            node_range = { start_row, start_col, end_row, end_col },
+          })
+        end
+
+        ::continue_node::
+      end
+    end
+  end
+
+  return changes
+end
+
+---Collect all import changes with async batched processing
+---@param old_dotted string Old import path
+---@param new_dotted string New import path
+---@param files string[] Files to check
+---@param project_root string Project root
+---@param progress_cb function? Progress callback (current, total, status)
+---@param callback function Completion callback with changes
+local function collect_changes_async(
+  old_dotted,
+  new_dotted,
+  files,
+  project_root,
+  progress_cb,
+  callback
+)
+  local changes = {}
+  local context_lines = 3
+  local batch_size = 10 -- Process 10 files at a time
+  local current_idx = 1
+
+  local function process_batch()
+    local batch_end = math.min(current_idx + batch_size - 1, #files)
+
+    for i = current_idx, batch_end do
+      local file = files[i]
+      local file_changes = process_file_changes(
+        file,
+        old_dotted,
+        new_dotted,
+        project_root,
+        context_lines
+      )
+      for _, change in ipairs(file_changes) do
+        table.insert(changes, change)
+      end
+
+      if progress_cb then
+        progress_cb(i, #files, file)
+      end
+    end
+
+    current_idx = batch_end + 1
+
+    if current_idx <= #files then
+      -- Schedule next batch to avoid blocking UI
+      vim.schedule(process_batch)
+    else
+      -- All done
+      callback(changes)
+    end
+  end
+
+  -- Start processing
+  process_batch()
+end
+
+---Compiled patterns for highlighting (cached for performance)
+local highlight_patterns = {
+  header = "^[╔║╠]",
+  separator = "^[─┬]",
+  git_mv = "git mv",
+  old_import = "%d+ | %-",
+  new_import = "%d+ | %+",
+  context = "^%s*%d+ |",
+  context_exclude = "[%+%-]",
+  accepted = "✓",
+  declined = "✗",
+}
+
+---Apply syntax highlighting to the preview buffer (optimized)
+---@param state PreviewState
+local function apply_highlights(state)
+  -- Clear existing highlights
+  api.nvim_buf_clear_namespace(state.bufnr, state.namespace, 0, -1)
+
+  local lines = api.nvim_buf_get_lines(state.bufnr, 0, -1, false)
+
+  -- Safety limit to prevent memory explosion on large previews
+  local MAX_HIGHLIGHT_LINES = 10000
+
+  -- Batch extmarks for better performance
+  local extmarks = {}
+
+  for line_idx, line_text in ipairs(lines) do
+    if line_idx > MAX_HIGHLIGHT_LINES then
+      break
+    end
+    local row = line_idx - 1 -- 0-indexed
+    local line_len = #line_text
+
+    -- Early continue for empty lines
+    if line_len == 0 then
+      goto continue
+    end
+
+    local first_char = line_text:sub(1, 1)
+
+    -- Fast path: check first character for common patterns
+    if first_char == "╔" or first_char == "║" or first_char == "╠" then
+      table.insert(extmarks, {
+        row,
+        0,
+        { end_col = line_len, hl_group = "PyMoveHeader", strict = false },
+      })
+    elseif first_char == "─" or first_char == "┬" then
+      table.insert(extmarks, {
+        row,
+        0,
+        { end_col = line_len, hl_group = "PyMoveSeparator", strict = false },
+      })
+    elseif line_text:find(highlight_patterns.git_mv, 1, true) then
+      table.insert(extmarks, {
+        row,
+        0,
+        {
+          end_col = line_len,
+          hl_group = "PyMoveFileOperation",
+          strict = false,
+        },
+      })
+    elseif line_text:match(highlight_patterns.old_import) then
+      table.insert(extmarks, {
+        row,
+        0,
+        { end_col = line_len, hl_group = "PyMoveOldImport", strict = false },
+      })
+    elseif line_text:match(highlight_patterns.new_import) then
+      table.insert(extmarks, {
+        row,
+        0,
+        { end_col = line_len, hl_group = "PyMoveNewImport", strict = false },
+      })
+    elseif
+      line_text:match(highlight_patterns.context)
+      and not line_text:match(highlight_patterns.context_exclude)
+    then
+      table.insert(extmarks, {
+        row,
+        0,
+        { end_col = line_len, hl_group = "PyMoveContext", strict = false },
+      })
+    else
+      -- Check for status indicators (less common, so check last)
+      local accepted_col = line_text:find(highlight_patterns.accepted, 1, true)
+      if accepted_col then
+        table.insert(extmarks, {
+          row,
+          accepted_col - 1,
+          {
+            end_col = accepted_col,
+            hl_group = "PyMoveAccepted",
+            strict = false,
+          },
+        })
+      end
+
+      local declined_col = line_text:find(highlight_patterns.declined, 1, true)
+      if declined_col then
+        table.insert(extmarks, {
+          row,
+          declined_col - 1,
+          {
+            end_col = declined_col,
+            hl_group = "PyMoveDeclined",
+            strict = false,
+          },
+        })
+      end
+    end
+
+    ::continue::
+  end
+
+  -- Apply all extmarks in batch
+  for _, mark in ipairs(extmarks) do
+    pcall(
+      api.nvim_buf_set_extmark,
+      state.bufnr,
+      state.namespace,
+      mark[1],
+      mark[2],
+      mark[3]
+    )
+  end
+end
+
+---Build the preview buffer with all changes
+---@param state PreviewState
+local function build_preview_buffer(state)
+  local lines = {}
+  local line_idx = 1
+
+  -- Show file move operation at top
+  table.insert(
+    lines,
+    "╔══════════════════════════════════════════════════════════════════════════════"
+  )
+  table.insert(lines, "║ File Operation")
+  table.insert(
+    lines,
+    "╠══════════════════════════════════════════════════════════════════════════════"
+  )
+  table.insert(
+    lines,
+    string.format("  git mv %s → %s", state.old_name, state.new_name)
+  )
+
+  -- Show truncation warning if applicable
+  if state.truncated then
+    table.insert(
+      lines,
+      string.format(
+        "  ⚠ Warning: Showing changes from limited file set (processed subset of %d files)",
+        state.total_files
+      )
+    )
+  end
+
+  table.insert(
+    lines,
+    "──────────────────────────────────────────────────────────────────────────────"
+  )
+  table.insert(lines, "")
+  line_idx = #lines + 1
+
+  -- Group changes by file
+  local files_map = {}
+  for _, change in ipairs(state.changes) do
+    if not files_map[change.file] then
+      files_map[change.file] = {}
+    end
+    table.insert(files_map[change.file], change)
+  end
+
+  -- Sort files for consistent display
+  local sorted_files = {}
+  for file, _ in pairs(files_map) do
+    table.insert(sorted_files, file)
+  end
+  table.sort(sorted_files)
+
+  for _, file in ipairs(sorted_files) do
+    local file_changes = files_map[file]
+
+    -- File header
+    table.insert(
+      lines,
+      "╔══════════════════════════════════════════════════════════════════════════════"
+    )
+    table.insert(lines, string.format("║ File: %s", file))
+    table.insert(
+      lines,
+      "╠══════════════════════════════════════════════════════════════════════════════"
+    )
+
+    for _, change in ipairs(file_changes) do
+      change.buffer_line = #lines + 1 -- Store line for navigation
+
+      -- Status indicator
+      local status_marker = ""
+      if change.status == "accepted" then
+        status_marker = " ✓"
+      elseif change.status == "declined" then
+        status_marker = " ✗"
+      end
+
+      -- Context before
+      for i, line in ipairs(change.context_before) do
+        local line_num = change.line_num - #change.context_before + i - 1
+        table.insert(lines, string.format(" %3d | %s", line_num, line))
+      end
+
+      -- Show different content based on status
+      if change.status == "accepted" then
+        -- Only show new import (green) with checkmark
+        table.insert(
+          lines,
+          string.format(
+            " %3d | + from %s%s",
+            change.line_num,
+            change.new_import,
+            status_marker
+          )
+        )
+      elseif change.status == "declined" then
+        -- Only show old import (red/neutral) with X
+        table.insert(
+          lines,
+          string.format(
+            " %3d | - from %s%s",
+            change.line_num,
+            change.old_import,
+            status_marker
+          )
+        )
+      else
+        -- Pending: show both old and new for comparison
+        -- Old import (red)
+        table.insert(
+          lines,
+          string.format(" %3d | - from %s", change.line_num, change.old_import)
+        )
+
+        -- New import (green)
+        table.insert(
+          lines,
+          string.format(" %3d | + from %s", change.line_num, change.new_import)
+        )
+      end
+
+      -- Context after
+      for i, line in ipairs(change.context_after) do
+        local line_num = change.line_num + i
+        table.insert(lines, string.format(" %3d | %s", line_num, line))
+      end
+
+      table.insert(
+        lines,
+        "──────────────────────────────────────────────────────────────────────────────"
+      )
+    end
+
+    table.insert(lines, "")
+  end
+
+  -- Make buffer modifiable before updating
+  vim.bo[state.bufnr].modifiable = true
+  api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
+  vim.bo[state.bufnr].modifiable = false
+
+  -- Apply syntax highlighting after buffer is fully updated
+  -- Use vim.schedule to ensure highlights are applied after rendering
+  vim.schedule(function()
+    if not api.nvim_win_is_valid(state.winid) then
+      return
+    end
+    if not api.nvim_buf_is_valid(state.bufnr) then
+      return
+    end
+    apply_highlights(state)
+  end)
+end
+
+-- Forward declarations
+local jump_to_change
+local apply_accepted_changes
+local find_change_at_cursor
+local update_winbar
+
+---Update winbar with help hint
+---@param state PreviewState
+function update_winbar(state)
+  vim.wo[state.winid].winbar = "  Press ? for help  "
+end
+
+---Find which change the cursor is currently on
+---@param state PreviewState
+---@return integer|nil Index of the change, or nil if not on a change
+function find_change_at_cursor(state)
+  local cursor_line = api.nvim_win_get_cursor(state.winid)[1]
+  local lines = api.nvim_buf_get_lines(state.bufnr, 0, -1, false)
+
+  -- Find the change that contains this cursor line
+  -- A change section includes:
+  -- - context_before lines
+  -- - import lines (1-2 depending on status)
+  -- - context_after lines
+  -- - separator line
+  local best_match = nil
+  local min_distance = math.huge
+
+  for i, change in ipairs(state.changes) do
+    if not change.buffer_line then
+      goto continue
+    end
+
+    -- Calculate the actual extent of this change's section
+    local section_start = change.buffer_line
+    local num_lines = #change.context_before + #change.context_after
+
+    -- Add import lines based on status
+    if change.status == "pending" then
+      num_lines = num_lines + 2 -- both old and new
+    else
+      num_lines = num_lines + 1 -- only one
+    end
+
+    -- Add separator line
+    num_lines = num_lines + 1
+
+    local section_end = section_start + num_lines - 1
+
+    -- Check if cursor is within this section
+    if cursor_line >= section_start and cursor_line <= section_end then
+      return i
+    end
+
+    -- Track the closest change if cursor is between sections
+    local distance = math.min(
+      math.abs(cursor_line - section_start),
+      math.abs(cursor_line - section_end)
+    )
+    if distance < min_distance then
+      min_distance = distance
+      best_match = i
+    end
+
+    ::continue::
+  end
+
+  -- If cursor is close to a change (within 5 lines), return it
+  if best_match and min_distance <= 5 then
+    return best_match
+  end
+
+  return nil
+end
+
+---Atomically update a single change's display lines
+---@param state PreviewState
+---@param change ChangePreview
+---@param old_status string Previous status before toggle
+local function update_change_lines(state, change, old_status)
+  -- Determine what lines to show based on NEW status
+  local new_lines = {}
+  local status_marker = ""
+
+  if change.status == "accepted" then
+    status_marker = " ✓"
+    -- Only show new import (green) with checkmark
+    table.insert(
+      new_lines,
+      string.format(
+        " %3d | + from %s%s",
+        change.line_num,
+        change.new_import,
+        status_marker
+      )
+    )
+  elseif change.status == "declined" then
+    status_marker = " ✗"
+    -- Only show old import (red/neutral) with X
+    table.insert(
+      new_lines,
+      string.format(
+        " %3d | - from %s%s",
+        change.line_num,
+        change.old_import,
+        status_marker
+      )
+    )
+  else
+    -- Pending: show both old and new for comparison
+    table.insert(
+      new_lines,
+      string.format(" %3d | - from %s", change.line_num, change.old_import)
+    )
+    table.insert(
+      new_lines,
+      string.format(" %3d | + from %s", change.line_num, change.new_import)
+    )
+  end
+
+  -- Calculate the range of import lines to replace based on OLD status
+  -- The import section starts after context_before lines
+  local import_start_line = change.buffer_line + #change.context_before
+  local old_import_lines = old_status == "pending" and 2 or 1
+
+  -- Update the buffer
+  vim.bo[state.bufnr].modifiable = true
+  api.nvim_buf_set_lines(
+    state.bufnr,
+    import_start_line - 1,
+    import_start_line - 1 + old_import_lines,
+    false,
+    new_lines
+  )
+  vim.bo[state.bufnr].modifiable = false
+
+  -- Clear and reapply highlights for these lines
+  api.nvim_buf_clear_namespace(
+    state.bufnr,
+    state.namespace,
+    import_start_line - 1,
+    import_start_line - 1 + #new_lines
+  )
+
+  for i, line_text in ipairs(new_lines) do
+    local row = import_start_line - 1 + i - 1
+    if line_text:match "%d+ | %-" then
+      api.nvim_buf_set_extmark(
+        state.bufnr,
+        state.namespace,
+        row,
+        0,
+        { end_col = #line_text, hl_group = "PyMoveOldImport", strict = false }
+      )
+    elseif line_text:match "%d+ | %+" then
+      api.nvim_buf_set_extmark(
+        state.bufnr,
+        state.namespace,
+        row,
+        0,
+        { end_col = #line_text, hl_group = "PyMoveNewImport", strict = false }
+      )
+    end
+
+    -- Highlight status markers
+    if line_text:match "✓" then
+      local start_col = line_text:find "✓"
+      if start_col then
+        api.nvim_buf_set_extmark(
+          state.bufnr,
+          state.namespace,
+          row,
+          start_col - 1,
+          { end_col = start_col, hl_group = "PyMoveAccepted", strict = false }
+        )
+      end
+    elseif line_text:match "✗" then
+      local start_col = line_text:find "✗"
+      if start_col then
+        api.nvim_buf_set_extmark(
+          state.bufnr,
+          state.namespace,
+          row,
+          start_col - 1,
+          { end_col = start_col, hl_group = "PyMoveDeclined", strict = false }
+        )
+      end
+    end
+  end
+
+  -- Adjust buffer_line for subsequent changes if the number of lines changed
+  local line_delta = #new_lines - old_import_lines
+  if line_delta ~= 0 then
+    for _, other_change in ipairs(state.changes) do
+      if other_change.buffer_line > change.buffer_line then
+        other_change.buffer_line = other_change.buffer_line + line_delta
+      end
+    end
+  end
+end
+
+---Toggle status of current change: pending → accepted → declined → pending
+---@param state PreviewState
+local function toggle_change_status(state)
+  -- Find which change cursor is on
+  local change_index = find_change_at_cursor(state)
+  if not change_index then
+    vim.notify("No change found at cursor position", vim.log.levels.WARN)
+    return
+  end
+
+  local change = state.changes[change_index]
+
+  -- Store cursor position for restoration
+  local cursor_pos = api.nvim_win_get_cursor(state.winid)
+
+  -- Store old status before cycling
+  local old_status = change.status
+
+  -- Cycle through statuses
+  if change.status == "pending" then
+    change.status = "accepted"
+  elseif change.status == "accepted" then
+    change.status = "declined"
+  else -- declined
+    change.status = "pending"
+  end
+
+  -- Update current_index
+  state.current_index = change_index
+
+  -- Atomically update just this change's lines
+  update_change_lines(state, change, old_status)
+
+  -- Restore cursor position
+  vim.schedule(function()
+    if not api.nvim_win_is_valid(state.winid) then
+      return
+    end
+    if not api.nvim_buf_is_valid(state.bufnr) then
+      return
+    end
+    -- Validate cursor position is within buffer bounds
+    local line_count = api.nvim_buf_line_count(state.bufnr)
+    if cursor_pos[1] > line_count then
+      cursor_pos[1] = line_count
+    end
+    pcall(api.nvim_win_set_cursor, state.winid, cursor_pos)
+  end)
+end
+
+---Create and show floating help window
+---@param parent_winid integer Parent window ID to position relative to
+---@return integer bufnr Help buffer number
+---@return integer winid Help window ID
+local function show_help_window(parent_winid)
+  local help_lines = {
+    "╔═ Keymaps ════════════════════════════════════════════════════",
+    "│ Navigation:",
+    "│   <C-n>         Jump to next change",
+    "│   <C-p>         Jump to previous change",
+    "│",
+    "│ Actions:",
+    "│   <Space>       Toggle status (pending → accepted → declined)",
+    "│   <C-a> / <A-a> Accept all pending changes",
+    "│",
+    "│ Finalize:",
+    "│   q             Apply accepted changes and close",
+    "│   <Esc>         Cancel without applying",
+    "│",
+    "│   ?             Close this help",
+    "╚══════════════════════════════════════════════════════════════",
+  }
+
+  -- Create buffer
+  local bufnr = api.nvim_create_buf(false, true)
+  vim.bo[bufnr].bufhidden = "wipe"
+  vim.bo[bufnr].buftype = "nofile"
+  vim.bo[bufnr].modifiable = false
+
+  -- Calculate position (centered in screen)
+  local width = 65
+  local height = #help_lines
+  local row = math.floor((vim.o.lines - height) / 2)
+  local col = math.floor((vim.o.columns - width) / 2)
+
+  local opts = {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = "minimal",
+    border = "rounded",
+    title = " Help ",
+    title_pos = "center",
+  }
+
+  local winid = api.nvim_open_win(bufnr, true, opts)
+
+  -- Set buffer content
+  vim.bo[bufnr].modifiable = true
+  api.nvim_buf_set_lines(bufnr, 0, -1, false, help_lines)
+  vim.bo[bufnr].modifiable = false
+
+  -- Apply highlights
+  local ns = api.nvim_create_namespace "pymove-help"
+  for i, line in ipairs(help_lines) do
+    local row_idx = i - 1
+    if line:match "^╔" or line:match "^╚" then
+      api.nvim_buf_set_extmark(
+        bufnr,
+        ns,
+        row_idx,
+        0,
+        { end_col = #line, hl_group = "PyMoveHeader", strict = false }
+      )
+    else
+      api.nvim_buf_set_extmark(
+        bufnr,
+        ns,
+        row_idx,
+        0,
+        { end_col = #line, hl_group = "PyMoveContext", strict = false }
+      )
+    end
+  end
+
+  -- Setup keymap to close help and return to preview window
+  vim.keymap.set("n", "?", function()
+    api.nvim_win_close(winid, true)
+    api.nvim_set_current_win(parent_winid)
+  end, { buffer = bufnr, silent = true })
+
+  vim.keymap.set("n", "<Esc>", function()
+    api.nvim_win_close(winid, true)
+    api.nvim_set_current_win(parent_winid)
+  end, { buffer = bufnr, silent = true })
+
+  vim.keymap.set("n", "q", function()
+    api.nvim_win_close(winid, true)
+    api.nvim_set_current_win(parent_winid)
+  end, { buffer = bufnr, silent = true })
+
+  return bufnr, winid
+end
+
+---Setup buffer-local keymaps
+---@param state PreviewState
+local function setup_keymaps(state)
+  local opts = { buffer = state.bufnr, silent = true }
+
+  -- Navigation (detect current position from cursor)
+  vim.keymap.set("n", "<C-n>", function()
+    local current = find_change_at_cursor(state)
+
+    if not current then
+      -- Not on a change - jump to the first one
+      jump_to_change(state, 1)
+    elseif current < #state.changes then
+      -- On a change - jump to next
+      jump_to_change(state, current + 1)
+    else
+      -- Already at last change
+      vim.notify("Already at last change", vim.log.levels.INFO)
+    end
+  end, opts)
+
+  vim.keymap.set("n", "<C-p>", function()
+    local current = find_change_at_cursor(state)
+
+    if not current then
+      -- Not on a change - jump to the last one
+      jump_to_change(state, #state.changes)
+    elseif current > 1 then
+      -- On a change - jump to previous
+      jump_to_change(state, current - 1)
+    else
+      -- Already at first change
+      vim.notify("Already at first change", vim.log.levels.INFO)
+    end
+  end, opts)
+
+  -- Toggle status of current change
+  vim.keymap.set("n", "<Space>", function()
+    toggle_change_status(state)
+  end, opts)
+
+  -- Accept all pending changes (just mark, don't apply)
+  vim.keymap.set("n", "<C-a>", function()
+    local cursor_pos = api.nvim_win_get_cursor(state.winid)
+    for _, change in ipairs(state.changes) do
+      if change.status == "pending" then
+        local old_status = change.status
+        change.status = "accepted"
+        update_change_lines(state, change, old_status)
+      end
+    end
+    -- Restore cursor position
+    pcall(api.nvim_win_set_cursor, state.winid, cursor_pos)
+  end, opts)
+
+  vim.keymap.set("n", "<A-a>", function()
+    local cursor_pos = api.nvim_win_get_cursor(state.winid)
+    for _, change in ipairs(state.changes) do
+      if change.status == "pending" then
+        local old_status = change.status
+        change.status = "accepted"
+        update_change_lines(state, change, old_status)
+      end
+    end
+    -- Restore cursor position
+    pcall(api.nvim_win_set_cursor, state.winid, cursor_pos)
+  end, opts)
+
+  -- Show help window
+  vim.keymap.set("n", "?", function()
+    show_help_window(state.winid)
+  end, opts)
+
+  -- Apply accepted changes and close
+  vim.keymap.set("n", "q", function()
+    apply_accepted_changes(state)
+  end, opts)
+
+  -- Cancel without applying
+  vim.keymap.set("n", "<Esc>", function()
+    vim.notify("Cancelled without applying changes", vim.log.levels.INFO)
+    api.nvim_win_close(state.winid, true)
+  end, opts)
+end
+
+---Jump to a specific change and highlight it
+---@param state PreviewState
+---@param index integer
+function jump_to_change(state, index)
+  if index < 1 or index > #state.changes then
+    return
+  end
+
+  state.current_index = index
+  local change = state.changes[index]
+
+  -- Move cursor to the change
+  api.nvim_win_set_cursor(state.winid, { change.buffer_line, 0 })
+
+  -- Center the view safely using API instead of normal command
+  local win_height = api.nvim_win_get_height(state.winid)
+  local target_line = change.buffer_line
+  local topline = math.max(1, target_line - math.floor(win_height / 2))
+  vim.fn.winrestview { topline = topline, lnum = target_line }
+
+  -- Update winbar
+  update_winbar(state)
+end
+
+---Apply only accepted changes
+---@param state PreviewState
+function apply_accepted_changes(state)
+  local log = get_log()
+
+  local accepted = vim.tbl_filter(function(change)
+    return change.status == "accepted"
+  end, state.changes)
+
+  if #accepted == 0 then
+    log.warn "No changes accepted. Aborting."
+    vim.notify("No changes were accepted", vim.log.levels.WARN)
+    api.nvim_win_close(state.winid, true)
+    return
+  end
+
+  -- Step 1: Move the file/directory (only if destination doesn't exist)
+  local old_path = Path:new(state.project_root) / state.old_name
+  local new_path = Path:new(state.project_root) / state.new_name
+
+  if new_path:exists() then
+    -- Destination already exists - skip move, just update imports
+    log.info(
+      string.format(
+        "Destination already exists: %s. Skipping move, updating imports only.",
+        tostring(new_path)
+      )
+    )
+  elseif old_path:exists() then
+    -- Normal case: move the file
+    local move_success, move_err = filesystem.move_file_or_directory(
+      tostring(old_path),
+      tostring(new_path),
+      state.use_git
+    )
+
+    if not move_success then
+      log.error("Failed to move file/directory: " .. move_err)
+      vim.notify("Failed to move: " .. move_err, vim.log.levels.ERROR)
+      return
+    end
+  else
+    -- Neither source nor destination exist - error
+    log.error "Source file/directory does not exist"
+    vim.notify("Error: Source path does not exist", vim.log.levels.ERROR)
+    return
+  end
+
+  -- Step 2: Update only accepted imports
+  -- Group accepted changes by file
+  local changes_by_file = {}
+  for _, change in ipairs(accepted) do
+    if not changes_by_file[change.file] then
+      changes_by_file[change.file] = {}
+    end
+    table.insert(changes_by_file[change.file], change)
+  end
+
+  -- Apply selective import updates per file
+  local updated_files = 0
+  for file, file_changes in pairs(changes_by_file) do
+    local num_updates =
+      refactor.update_specific_imports(file, file_changes, state.project_root)
+    if num_updates and num_updates > 0 then
+      updated_files = updated_files + 1
+    end
+  end
+
+  log.info(
+    string.format(
+      "Successfully moved and updated %d imports in %d files",
+      #accepted,
+      updated_files
+    )
+  )
+
+  vim.notify(
+    string.format(
+      "✓ Moved %s → %s and updated %d imports",
+      state.old_name,
+      state.new_name,
+      #accepted
+    ),
+    vim.log.levels.INFO
+  )
+
+  api.nvim_win_close(state.winid, true)
+end
+
+---Show interactive preview for module move
+---@param old_name string Source module path
+---@param new_name string Destination module path
+---@param project_root string? Project root
+---@param options table? Options (use_git, max_files)
+function M.show_interactive_preview(old_name, new_name, project_root, options)
+  local log = get_log()
+  options = options or {}
+  project_root = project_root or fn.getcwd()
+
+  local use_git = options.use_git
+  if use_git == nil then
+    use_git = filesystem.is_git_repo(project_root)
+  end
+
+  -- File limit to prevent processing too many files at once
+  local max_files = options.max_files or 200
+
+  -- Collect files that might need updates
+  local old_dotted = utils.path_to_dotted_name(old_name)
+  local new_dotted = utils.path_to_dotted_name(new_name)
+  local change = utils.estimate_change(old_dotted, new_dotted)
+  local pattern = utils.file_change_pattern(change)
+  local all_files =
+    refactor.find_files_with_pattern(pattern, project_root, "*.py")
+
+  if #all_files == 0 then
+    log.info "No import changes detected."
+    vim.notify("No imports to update", vim.log.levels.INFO)
+    return
+  end
+
+  -- Limit files if necessary
+  local files = all_files
+  local truncated = false
+  if #all_files > max_files then
+    files = vim.list_slice(all_files, 1, max_files)
+    truncated = true
+    vim.notify(
+      string.format(
+        "Processing first %d of %d files (limit: max_files=%d)",
+        max_files,
+        #all_files,
+        max_files
+      ),
+      vim.log.levels.WARN
+    )
+  end
+
+  -- Setup highlights
+  setup_highlights()
+
+  -- Show loading window
+  local loading_bufnr, loading_winid = create_loading_window()
+  update_loading_progress(loading_bufnr, 0, #files, nil)
+
+  -- Collect changes asynchronously with progress updates
+  collect_changes_async(
+    old_dotted,
+    new_dotted,
+    files,
+    project_root,
+    function(current, total, file)
+      -- Progress callback
+      if api.nvim_win_is_valid(loading_winid) then
+        update_loading_progress(loading_bufnr, current, total, file)
+      end
+    end,
+    function(changes)
+      -- Completion callback
+      -- Close loading window
+      if api.nvim_win_is_valid(loading_winid) then
+        api.nvim_win_close(loading_winid, true)
+      end
+
+      if #changes == 0 then
+        log.info "No matching imports found."
+        vim.notify("No matching imports found", vim.log.levels.INFO)
+        return
+      end
+
+      -- Create preview window
+      local bufnr, winid = create_floating_window()
+
+      -- Create state
+      local state = {
+        changes = changes,
+        current_index = 1,
+        bufnr = bufnr,
+        winid = winid,
+        old_name = old_name,
+        new_name = new_name,
+        project_root = project_root,
+        use_git = use_git,
+        namespace = api.nvim_create_namespace "pymove-preview",
+        truncated = truncated,
+        total_files = #all_files,
+      }
+
+      -- Build buffer and setup keymaps
+      build_preview_buffer(state)
+      setup_keymaps(state)
+
+      -- Jump to first change after everything is rendered
+      vim.schedule(function()
+        if not api.nvim_win_is_valid(state.winid) then
+          return
+        end
+        if not api.nvim_buf_is_valid(state.bufnr) then
+          return
+        end
+        jump_to_change(state, 1)
+      end)
+    end
+  )
+end
+
+return M
