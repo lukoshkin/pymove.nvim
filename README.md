@@ -6,20 +6,17 @@ A comprehensive Neovim plugin for Python development that provides intelligent c
 
 **pymove.nvim** combines two powerful features for Python development:
 
-1. **Sort** - Intelligently organize functions and class methods
-2. **Move** - Refactor module/package locations with automatic import updates
+1. **Move** - Refactor module/package locations with automatic import updates
+1. **Sort** (beta) - Intelligently organize functions and class methods
+
+## Demo
+
+![Command Interface](img/1_cmd.png)
+![Progress Bar](img/2_pbar.png)
+![File Selection](img/3_top.png)
+![Toggle Options](img/4_toggle.png)
 
 ## Features
-
-### Sorting
-
-- Smart method categorization (dunder → public → private)
-- Preserve special methods like `__init__` at the top
-- Dependency-aware topological sorting for module functions
-- Multiple sorting scopes (visual selection, class, file)
-- Treesitter-powered for fast and accurate parsing
-
-[**→ Detailed Sort Documentation**](lua/sort/README.md)
 
 ### Move/Rename
 
@@ -30,6 +27,16 @@ A comprehensive Neovim plugin for Python development that provides intelligent c
 - Safe validation before execution
 
 [**→ Detailed Move Documentation**](lua/move/README.md)
+
+### Sorting
+
+- Smart method categorization (dunder → public → private)
+- Preserve special methods like `__init__` at the top
+- Dependency-aware topological sorting for module functions
+- Multiple sorting scopes (visual selection, class, file)
+- Treesitter-powered for fast and accurate parsing
+
+[**→ Detailed Sort Documentation**](lua/sort/README.md)
 
 ## Requirements
 
@@ -76,24 +83,6 @@ A comprehensive Neovim plugin for Python development that provides intelligent c
 
 ## Quick Start
 
-### Sorting
-
-```vim
-" Sort methods in current class
-:PySortClass
-
-" Sort entire file
-:PySortFile
-
-" Sort visual selection (in visual mode)
-:PySortMethods visual
-```
-
-**Default keymaps:**
-- `<Space>mc` - Sort methods in current class
-- `<Space>mm` - Sort all functions/methods in file
-- `<Space>m` - Sort functions/methods in visual selection (visual mode)
-
 ### Moving/Renaming
 
 ```vim
@@ -108,13 +97,34 @@ A comprehensive Neovim plugin for Python development that provides intelligent c
 ```
 
 **Default keymap:**
+
 - `<Space>mr` - Interactive move/rename with UI
+
+### Sorting
+
+```vim
+" Sort methods in current class
+:PySortClass
+
+" Sort entire file
+:PySortFile
+
+" Sort visual selection (in visual mode)
+:PySortMethods visual
+```
+
+**Default keymaps:**
+
+- `<Space>mc` - Sort methods in current class
+- `<Space>mm` - Sort all functions/methods in file
+- `<Space>m` - Sort functions/methods in visual selection (visual mode)
 
 ## Examples
 
 ### Sorting a Class
 
 **Before:**
+
 ```python
 class MyClass:
     def _private_helper(self):
@@ -131,6 +141,7 @@ class MyClass:
 ```
 
 **After** (`:PySortClass`):
+
 ```python
 class MyClass:
     def __init__(self):
@@ -149,11 +160,13 @@ class MyClass:
 ### Moving a Module
 
 **Command:**
+
 ```vim
 :PyMovePreview src/utils.py src/helpers/utils.py
 ```
 
 **Automatic import updates:**
+
 ```python
 # Before
 from src.utils import helper_function
@@ -227,19 +240,19 @@ opts = {
 
 ### Sorting Commands
 
-| Command | Description |
-|---------|-------------|
-| `:PySortClass` | Sort methods in the class at cursor |
-| `:PySortFile` | Sort all functions and methods in file |
+| Command                  | Description                                   |
+| ------------------------ | --------------------------------------------- |
+| `:PySortClass`           | Sort methods in the class at cursor           |
+| `:PySortFile`            | Sort all functions and methods in file        |
 | `:PySortMethods <scope>` | Sort with scope: `visual`, `class`, or `file` |
 
 ### Move/Rename Commands
 
-| Command | Description |
-|---------|-------------|
-| `:PyMoveUI` | Interactive move with prompts and preview |
-| `:PyMovePreview <old> <new>` | Preview changes before applying |
-| `:PyMove <old> <new>` | Move directly without preview |
+| Command                      | Description                               |
+| ---------------------------- | ----------------------------------------- |
+| `:PyMoveUI`                  | Interactive move with prompts and preview |
+| `:PyMovePreview <old> <new>` | Preview changes before applying           |
+| `:PyMove <old> <new>`        | Move directly without preview             |
 
 ## Lua API
 
@@ -306,6 +319,7 @@ def caller():
 ### Interactive Move Preview
 
 The move preview window provides:
+
 - Visual diff of all changes
 - Per-file change approval/rejection
 - Navigation between changes
