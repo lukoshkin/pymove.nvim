@@ -61,9 +61,10 @@ function M.create_floating_window()
 end
 
 ---Create a loading progress window
+---@param title string? Window title (default: "Processing Files")
 ---@return integer bufnr
 ---@return integer winid
-function M.create_loading_window()
+function M.create_loading_window(title)
   local width = 60
   local height = 6
   local row = math.floor((vim.o.lines - height) / 2)
@@ -82,7 +83,7 @@ function M.create_loading_window()
     col = col,
     style = "minimal",
     border = "rounded",
-    title = " Processing Files ",
+    title = title or " Processing Files ",
     title_pos = "center",
   }
 

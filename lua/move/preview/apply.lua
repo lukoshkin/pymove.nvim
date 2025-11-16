@@ -63,20 +63,32 @@ function M.apply_accepted_changes(state)
   end
 
   -- Step 2: Update only accepted imports
-  -- Group accepted changes by file
+  -- Group accepted changes by file and update paths after move
+  local old_path_str = tostring(old_path)
+  local new_path_str = tostring(new_path)
   local changes_by_file = {}
+
   for _, change in ipairs(accepted) do
-    if not changes_by_file[change.file] then
-      changes_by_file[change.file] = {}
+    local file_path = change.file
+    -- Update path if file was inside the moved directory
+    if file_path:sub(1, #old_path_str) == old_path_str then
+      file_path = new_path_str .. file_path:sub(#old_path_str + 1)
     end
-    table.insert(changes_by_file[change.file], change)
+
+    if not changes_by_file[file_path] then
+      changes_by_file[file_path] = {}
+    end
+    table.insert(changes_by_file[file_path], change)
   end
 
-  -- Apply selective import updates per file
+  -- Apply selective import updates per file using direct I/O
   local updated_files = 0
   for file, file_changes in pairs(changes_by_file) do
-    local num_updates =
-      refactor.update_specific_imports(file, file_changes, state.project_root)
+    local num_updates = refactor.update_specific_imports_direct(
+      file,
+      file_changes,
+      state.project_root
+    )
     if num_updates and num_updates > 0 then
       updated_files = updated_files + 1
     end

@@ -1,8 +1,8 @@
 local fn = vim.fn
 local Path = require "plenary.path"
-local utils = require "move.utils"
-local refactor = require "move.refactor"
 local filesystem = require "move.filesystem"
+local refactor = require "move.refactor"
+local utils = require "move.utils"
 
 local M = {}
 
@@ -84,31 +84,61 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
     return false, move_err
   end
 
-  -- Step 2: Update imports in all affected files
-  local updated_files = 0
-  for _, file in ipairs(files) do
-    local before_update = fn.getftime(file)
-    refactor.update_imports(file, old_dotted, new_dotted, project_root)
-    local after_update = fn.getftime(file)
-
-    if after_update > before_update then
-      updated_files = updated_files + 1
+  -- Update file paths after move (files inside the moved directory have new paths)
+  local old_path_str = tostring(old_path)
+  local new_path_str = tostring(new_path)
+  for i, file in ipairs(files) do
+    if file:sub(1, #old_path_str) == old_path_str then
+      files[i] = new_path_str .. file:sub(#old_path_str + 1)
     end
   end
 
-  log.info(
-    string.format(
-      "Successfully moved module/package and updated imports in %d files",
-      updated_files
-    )
+  -- Step 2: Update imports in all affected files with progress bar
+  local updated_files = 0
+
+  if #files > 0 then
+    local window = require "move.preview.window"
+    local title = string.format(" Updating Imports (%d files) ", #files)
+    local loading_bufnr, loading_winid = window.create_loading_window(title)
+
+    for i, file in ipairs(files) do
+      -- Update progress
+      window.update_loading_progress(loading_bufnr, i - 1, #files, file)
+
+      local num_changes = refactor.update_imports_direct(
+        file,
+        old_dotted,
+        new_dotted,
+        project_root
+      )
+      if num_changes > 0 then
+        updated_files = updated_files + 1
+      end
+    end
+
+    -- Final progress update
+    window.update_loading_progress(loading_bufnr, #files, #files, nil)
+
+    -- Brief pause to show completion before closing
+    vim.cmd "redraw"
+    vim.defer_fn(function()
+      if vim.api.nvim_win_is_valid(loading_winid) then
+        vim.api.nvim_win_close(loading_winid, true)
+      end
+    end, 500)
+  end
+
+  local success_msg = string.format(
+    "Moved %s → %s and updated %d files",
+    old_name,
+    new_name,
+    updated_files
   )
-  return true,
-    string.format(
-      "Moved %s -> %s and updated %d files",
-      old_name,
-      new_name,
-      updated_files
-    )
+
+  log.info(success_msg)
+  vim.notify(success_msg, vim.log.levels.INFO)
+
+  return true, success_msg
 end
 
 ---Preview a move operation with interactive UI
