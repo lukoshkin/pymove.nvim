@@ -132,7 +132,17 @@ function M.apply_highlights_range(bufnr, namespace, start_line, end_line)
     end
 
     -- Apply appropriate highlights based on content
-    if line_text:match(M.patterns.old_import) then
+    if
+      line_text:find(M.patterns.git_mv, 1, true)
+      or line_text:find("mv ", 1, true)
+    then
+      -- Highlight file move operation lines
+      pcall(api.nvim_buf_set_extmark, bufnr, namespace, row, 0, {
+        end_col = line_len,
+        hl_group = "PyMoveFileOperation",
+        strict = false,
+      })
+    elseif line_text:match(M.patterns.old_import) then
       pcall(api.nvim_buf_set_extmark, bufnr, namespace, row, 0, {
         end_col = line_len,
         hl_group = "PyMoveOldImport",
@@ -146,7 +156,7 @@ function M.apply_highlights_range(bufnr, namespace, start_line, end_line)
       })
     end
 
-    -- Check for status indicators
+    -- Check for status indicators (these should override base line color)
     local accepted_col = line_text:find(M.patterns.accepted, 1, true)
     if accepted_col then
       pcall(
@@ -159,6 +169,7 @@ function M.apply_highlights_range(bufnr, namespace, start_line, end_line)
           end_col = accepted_col,
           hl_group = "PyMoveAccepted",
           strict = false,
+          priority = 200, -- Higher priority to override base highlight
         }
       )
     end
@@ -175,6 +186,7 @@ function M.apply_highlights_range(bufnr, namespace, start_line, end_line)
           end_col = declined_col,
           hl_group = "PyMoveDeclined",
           strict = false,
+          priority = 200, -- Higher priority to override base highlight
         }
       )
     end

@@ -8,18 +8,58 @@ local M = {}
 function M.build_preview_buffer(state)
   local lines = {}
 
-  -- Show file move operation at top
-  local operation_label = "File Operation"
-  local operation_width = vim.fn.strwidth(operation_label) + 2 -- +2 for "║ " prefix
-  local operation_border = string.rep("═", operation_width)
+  -- Show file move operation at top (first change should be the move operation)
+  local move_op = state.changes[1]
+  if move_op and move_op.type == "file_move" then
+    local operation_label = "File Operation"
+    local operation_width = vim.fn.strwidth(operation_label) + 2
+    local operation_border = string.rep("═", operation_width)
 
-  table.insert(lines, "╔" .. operation_border .. "╗")
-  table.insert(lines, string.format("║ %s ║", operation_label))
-  table.insert(lines, "╚" .. operation_border .. "╝")
-  table.insert(
-    lines,
-    string.format("  git mv %s → %s", state.old_name, state.new_name)
-  )
+    table.insert(lines, "╔" .. operation_border .. "╗")
+    table.insert(lines, string.format("║ %s ║", operation_label))
+    table.insert(lines, "╚" .. operation_border .. "╝")
+
+    -- Mark the line where move operation starts for toggle functionality
+    move_op.buffer_line = #lines + 1
+
+    -- Show status marker
+    local status_marker = ""
+    if move_op.status == "accepted" then
+      status_marker = " ✓"
+    elseif move_op.status == "declined" then
+      status_marker = " ✗"
+    end
+
+    -- Show move command with status
+    local cmd = move_op.use_git and "git mv" or "mv"
+    local line = string.format(
+      "  %s %s → %s%s",
+      cmd,
+      move_op.old_name,
+      move_op.new_name,
+      status_marker
+    )
+
+    -- Add warning if destination exists
+    if move_op.dest_exists then
+      line = line .. " ⚠️  (destination exists)"
+    end
+
+    table.insert(lines, line)
+  else
+    -- Fallback if move operation is not first change
+    local operation_label = "File Operation"
+    local operation_width = vim.fn.strwidth(operation_label) + 2
+    local operation_border = string.rep("═", operation_width)
+
+    table.insert(lines, "╔" .. operation_border .. "╗")
+    table.insert(lines, string.format("║ %s ║", operation_label))
+    table.insert(lines, "╚" .. operation_border .. "╝")
+    table.insert(
+      lines,
+      string.format("  git mv %s → %s", state.old_name, state.new_name)
+    )
+  end
 
   -- Show truncation warning if applicable
   if state.truncated then
@@ -36,13 +76,16 @@ function M.build_preview_buffer(state)
   -- File headers provide sufficient visual separation
   table.insert(lines, "")
 
-  -- Group changes by file
+  -- Group changes by file (skip move operation)
   local files_map = {}
   for _, change in ipairs(state.changes) do
-    if not files_map[change.file] then
-      files_map[change.file] = {}
+    -- Skip the file move operation (it's already shown above)
+    if change.type ~= "file_move" then
+      if not files_map[change.file] then
+        files_map[change.file] = {}
+      end
+      table.insert(files_map[change.file], change)
     end
-    table.insert(files_map[change.file], change)
   end
 
   -- Sort files for consistent display
@@ -211,7 +254,50 @@ end
 ---@param change table ChangePreview
 ---@param old_status string Previous status before toggle
 function M.update_change_lines(state, change, old_status)
-  -- Determine what lines to show based on NEW status
+  -- Handle file move operation separately
+  if change.type == "file_move" then
+    local status_marker = ""
+    if change.status == "accepted" then
+      status_marker = " ✓"
+    elseif change.status == "declined" then
+      status_marker = " ✗"
+    end
+
+    local cmd = change.use_git and "git mv" or "mv"
+    local line = string.format(
+      "  %s %s → %s%s",
+      cmd,
+      change.old_name,
+      change.new_name,
+      status_marker
+    )
+
+    if change.dest_exists then
+      line = line .. " ⚠️  (destination exists)"
+    end
+
+    -- Update the single line
+    vim.bo[state.bufnr].modifiable = true
+    api.nvim_buf_set_lines(
+      state.bufnr,
+      change.buffer_line - 1,
+      change.buffer_line,
+      false,
+      { line }
+    )
+    vim.bo[state.bufnr].modifiable = false
+
+    -- Apply highlights to the updated line
+    highlight.apply_highlights_range(
+      state.bufnr,
+      state.namespace,
+      change.buffer_line - 1,
+      change.buffer_line
+    )
+    return
+  end
+
+  -- Handle import changes
   local new_lines = {}
   local status_marker = ""
 

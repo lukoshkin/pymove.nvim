@@ -60,6 +60,28 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
     use_git = filesystem.is_git_repo(project_root)
   end
 
+  -- Validate that source exists before showing preview
+  local Path = require "plenary.path"
+  local old_path = Path:new(project_root) / old_name
+  local new_path = Path:new(project_root) / new_name
+
+  if not old_path:exists() then
+    log.error(
+      "Cannot preview move: Source path does not exist: " .. tostring(old_path)
+    )
+    vim.notify(
+      "Cannot preview move: Source does not exist: " .. old_name,
+      vim.log.levels.ERROR
+    )
+    return
+  end
+
+  -- Warn if destination already exists (don't block, just warn)
+  local dest_exists = new_path:exists()
+  if dest_exists then
+    log.warn("Warning: Destination already exists: " .. tostring(new_path))
+  end
+
   -- File limit to prevent processing too many files at once
   local max_files = options.max_files or 200
 
@@ -128,6 +150,19 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
 
       -- Create preview window
       local bufnr, winid = window.create_floating_window()
+
+      -- Add file move operation as first "change"
+      local move_operation = {
+        type = "file_move",
+        file = tostring(old_path),
+        old_name = old_name,
+        new_name = new_name,
+        status = "pending", -- Default to pending (user must explicitly accept)
+        buffer_line = 4, -- Line where move operation is shown (after header)
+        dest_exists = dest_exists,
+        use_git = use_git,
+      }
+      table.insert(changes, 1, move_operation)
 
       -- Create state
       local state = {
