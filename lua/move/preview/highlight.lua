@@ -33,13 +33,10 @@ function M.apply_highlights(bufnr, namespace)
       break
     end
 
-    local row = line_idx - 1 -- 0-indexed
-    local line_len = #line_text
+    local row, line_len = line_idx - 1, #line_text
     if line_len == 0 then
       goto continue
     end
-
-    -- Check patterns (box-drawing chars are multi-byte UTF-8)
     if line_text:match(M.patterns.header) then
       table.insert(extmarks, {
         row,
@@ -75,7 +72,6 @@ function M.apply_highlights(bufnr, namespace)
         { end_col = line_len, hl_group = "PyMoveContext", strict = false },
       })
     else
-      -- Check for status indicators (less common, so check last)
       local accepted_col = line_text:find(M.patterns.accepted, 1, true)
       if accepted_col then
         table.insert(extmarks, {
@@ -106,37 +102,27 @@ function M.apply_highlights(bufnr, namespace)
     ::continue::
   end
 
-  -- Apply all extmarks in batch
   for _, mark in ipairs(extmarks) do
     api.nvim_buf_set_extmark(bufnr, namespace, mark[1], mark[2], mark[3])
   end
 end
 
----Apply highlights to a range of lines (for incremental updates)
 ---@param bufnr integer Buffer number
 ---@param namespace integer Namespace for extmarks
 ---@param start_line integer Start line (0-indexed)
 ---@param end_line integer End line (exclusive, 0-indexed)
 function M.apply_highlights_range(bufnr, namespace, start_line, end_line)
-  -- Clear existing highlights in range
   api.nvim_buf_clear_namespace(bufnr, namespace, start_line, end_line)
 
   local lines = api.nvim_buf_get_lines(bufnr, start_line, end_line, false)
 
   for i, line_text in ipairs(lines) do
-    local row = start_line + i - 1
-    local line_len = #line_text
-
+    local row, line_len = start_line + i - 1, #line_text
     if line_len == 0 then
       goto continue
     end
 
-    -- Apply appropriate highlights based on content
-    if
-      line_text:find(M.patterns.git_mv, 1, true)
-      or line_text:find("mv ", 1, true)
-    then
-      -- Highlight file move operation lines
+    if line_text:find(M.patterns.git_mv, 1, true) or line_text:find("mv ", 1, true) then
       pcall(api.nvim_buf_set_extmark, bufnr, namespace, row, 0, {
         end_col = line_len,
         hl_group = "PyMoveFileOperation",
@@ -156,7 +142,6 @@ function M.apply_highlights_range(bufnr, namespace, start_line, end_line)
       })
     end
 
-    -- Check for status indicators (these should override base line color)
     local accepted_col = line_text:find(M.patterns.accepted, 1, true)
     if accepted_col then
       pcall(
@@ -169,7 +154,7 @@ function M.apply_highlights_range(bufnr, namespace, start_line, end_line)
           end_col = accepted_col,
           hl_group = "PyMoveAccepted",
           strict = false,
-          priority = 200, -- Higher priority to override base highlight
+          priority = 200,
         }
       )
     end
@@ -186,7 +171,7 @@ function M.apply_highlights_range(bufnr, namespace, start_line, end_line)
           end_col = declined_col,
           hl_group = "PyMoveDeclined",
           strict = false,
-          priority = 200, -- Higher priority to override base highlight
+          priority = 200,
         }
       )
     end

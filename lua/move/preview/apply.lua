@@ -5,24 +5,21 @@ local refactor = require "move.refactor"
 
 local M = {}
 
----Get logger instance
----@return table Logger
-local function get_log()
-  return require("plenary.log").new {
-    plugin = "pymove-preview-apply",
-    use_console = true,
-  }
+local log = require("plenary.log").new {
+  plugin = "pymove-preview-apply",
+  use_console = true,
+}
+
+local function notify_error_and_close(message, state)
+  log.error(message)
+  vim.notify(message, vim.log.levels.ERROR)
+  api.nvim_win_close(state.winid, true)
 end
 
 ---Apply only accepted changes
 ---@param state table PreviewState
 function M.apply_accepted_changes(state)
-  local log = get_log()
-
-  -- Separate move operation from import changes
-  local move_operation = nil
-  local import_changes = {}
-
+  local move_operation, import_changes = nil, {}
   for _, change in ipairs(state.changes) do
     if change.type == "file_move" then
       move_operation = change
@@ -31,15 +28,13 @@ function M.apply_accepted_changes(state)
     end
   end
 
-  -- Filter accepted import changes
   local accepted_imports = vim.tbl_filter(function(change)
     return change.status == "accepted"
   end, import_changes)
 
-  -- Check if anything is accepted
   local move_accepted = move_operation and move_operation.status == "accepted"
   if not move_accepted and #accepted_imports == 0 then
-    log.warn "No changes accepted. Aborting."
+    log.warn "No changes accepted"
     vim.notify("No changes were accepted", vim.log.levels.WARN)
     api.nvim_win_close(state.winid, true)
     return
@@ -48,13 +43,11 @@ function M.apply_accepted_changes(state)
   local old_path = Path:new(state.project_root) / state.old_name
   local new_path = Path:new(state.project_root) / state.new_name
 
-  -- Step 1: Move the file/directory (only if move operation is accepted)
   if move_accepted then
     if not old_path:exists() then
-      log.error("Source file does not exist: " .. tostring(old_path))
-      vim.notify(
+      notify_error_and_close(
         "Error: Source path does not exist:\n" .. tostring(old_path),
-        vim.log.levels.ERROR
+        state
       )
       return
     end
@@ -69,16 +62,12 @@ function M.apply_accepted_changes(state)
       vim.fn.system(test_cmd)
 
       if vim.v.shell_error ~= 0 then
-        log.error(
-          "Destination exists but is not accessible: " .. dest_path_str
-        )
-        vim.notify(
+        notify_error_and_close(
           "Error: Destination exists but is not accessible by current user:\n"
             .. state.new_name
             .. "\n\nCheck file permissions or try running with sudo/appropriate permissions.",
-          vim.log.levels.ERROR
+          state
         )
-        api.nvim_win_close(state.winid, true)
         return
       end
 
@@ -104,27 +93,19 @@ function M.apply_accepted_changes(state)
 
       local rm_output = vim.fn.system(rm_cmd)
       if vim.v.shell_error ~= 0 then
-        log.error("Failed to remove existing destination: " .. rm_output)
-        vim.notify(
+        notify_error_and_close(
           "Failed to remove existing destination: "
             .. rm_output
             .. "\n\nYou may need appropriate permissions to overwrite this file.",
-          vim.log.levels.ERROR
+          state
         )
-        api.nvim_win_close(state.winid, true)
         return
       end
 
       if new_path:exists() then
-        log.error "Destination still exists after removal attempt"
-        vim.notify(
-          "Failed to remove existing destination",
-          vim.log.levels.ERROR
-        )
-        api.nvim_win_close(state.winid, true)
+        notify_error_and_close("Failed to remove existing destination", state)
         return
       end
-
       log.info "Successfully removed existing destination"
     end
 
@@ -141,31 +122,23 @@ function M.apply_accepted_changes(state)
     end
     log.info(string.format("Moved %s → %s", state.old_name, state.new_name))
   else
-    log.info "File move operation declined - skipping file move"
+    log.info "File move operation declined"
   end
-
-  -- Step 2: Update only accepted imports
   local updated_files = 0
   if #accepted_imports > 0 then
-    -- Group accepted changes by file and update paths after move
-    local old_path_str = tostring(old_path)
-    local new_path_str = tostring(new_path)
+    local old_path_str, new_path_str = tostring(old_path), tostring(new_path)
     local changes_by_file = {}
 
     for _, change in ipairs(accepted_imports) do
       local file_path = change.file
-      -- Update path if file was inside the moved directory (only if move happened)
       if move_accepted and file_path:sub(1, #old_path_str) == old_path_str then
         file_path = new_path_str .. file_path:sub(#old_path_str + 1)
       end
 
-      if not changes_by_file[file_path] then
-        changes_by_file[file_path] = {}
-      end
+      changes_by_file[file_path] = changes_by_file[file_path] or {}
       table.insert(changes_by_file[file_path], change)
     end
 
-    -- Apply selective import updates per file using direct I/O
     for file, file_changes in pairs(changes_by_file) do
       local num_updates = refactor.update_specific_imports_direct(
         file,
@@ -177,8 +150,6 @@ function M.apply_accepted_changes(state)
       end
     end
   end
-
-  -- Build success message
   local msg_parts = {}
   if move_accepted then
     table.insert(
