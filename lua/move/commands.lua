@@ -2,6 +2,51 @@ local api = vim.api
 
 local M = {}
 
+---Complete Python file paths relative to project root
+---@param arglead string Current argument being completed
+---@param cmdline string Full command line
+---@param curpos integer Cursor position
+---@return string[] Completion candidates
+local function complete_python_paths(arglead, cmdline, curpos)
+  local filesystem = require "move.filesystem"
+  local project_root = filesystem.find_project_root()
+
+  -- Count how many arguments we have
+  local args = vim.split(cmdline, "%s+", { trimempty = true })
+  local arg_count = #args - 1 -- Subtract command name
+  if cmdline:match "%s$" then
+    arg_count = arg_count + 1
+  end
+
+  -- For 3rd+ arguments, complete flags
+  if arg_count >= 3 then
+    local flags = { "--no-git", "--git" }
+    return vim.tbl_filter(function(flag)
+      return flag:find("^" .. vim.pesc(arglead))
+    end, flags)
+  end
+
+  -- For 1st and 2nd arguments, complete Python files
+  local pattern = arglead .. "*.py"
+  local candidates = vim.fn.glob(pattern, false, true)
+
+  -- Also check for directories (potential packages)
+  local dir_pattern = arglead .. "*/"
+  local dirs = vim.fn.glob(dir_pattern, false, true)
+
+  -- Combine and make paths relative to project root
+  for _, dir in ipairs(dirs) do
+    table.insert(candidates, dir)
+  end
+
+  -- Remove leading ./ if present
+  for i, path in ipairs(candidates) do
+    candidates[i] = path:gsub("^%./", "")
+  end
+
+  return candidates
+end
+
 ---Setup commands and keymaps for move functionality
 ---@param opts MoveConfig
 function M.setup(opts)
@@ -36,9 +81,7 @@ function M.setup(opts)
   end, {
     nargs = "*",
     desc = "Move Python module/package and update imports directly",
-    complete = function(arglead, cmdline, curpos)
-      return { "--no-git", "--git" }
-    end,
+    complete = complete_python_paths,
   })
 
   api.nvim_create_user_command("PyMovePreview", function(cmd_opts)
@@ -66,6 +109,7 @@ function M.setup(opts)
   end, {
     nargs = "*",
     desc = "Preview Python module/package move with interactive UI",
+    complete = complete_python_paths,
   })
 
   api.nvim_create_user_command("PyMoveUI", function()
