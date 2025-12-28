@@ -83,11 +83,15 @@ function M.process_file_changes(
           local context_before = api.nvim_buf_get_lines(bufnr, ctx_start, start_row, false)
           local context_after = api.nvim_buf_get_lines(bufnr, end_row + 1, ctx_end, false)
 
+          -- Get the full import line for display
+          local full_line = api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1] or ""
+
           table.insert(changes, {
             file = file,
             line_num = start_row + 1,
             old_import = name,
             new_import = new_import,
+            full_line = full_line,
             context_before = context_before,
             context_after = context_after,
             status = "pending",

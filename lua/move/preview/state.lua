@@ -154,13 +154,17 @@ function M.build_preview_buffer(state)
       end
 
       -- Show import diff based on status
+      -- Use full_line if available, otherwise fallback to simplified format
+      local old_line = change.full_line or ("from " .. change.old_import)
+      local new_line = old_line:gsub(vim.pesc(change.old_import), change.new_import)
+
       if change.status == "accepted" then
         table.insert(
           lines,
           string.format(
-            "+ %3d | from %s%s",
+            "+ %3d | %s%s",
             change.line_num,
-            change.new_import,
+            new_line,
             status_marker
           )
         )
@@ -168,20 +172,20 @@ function M.build_preview_buffer(state)
         table.insert(
           lines,
           string.format(
-            "- %3d | from %s%s",
+            "- %3d | %s%s",
             change.line_num,
-            change.old_import,
+            old_line,
             status_marker
           )
         )
       else
         table.insert(
           lines,
-          string.format("- %3d | from %s", change.line_num, change.old_import)
+          string.format("- %3d | %s", change.line_num, old_line)
         )
         table.insert(
           lines,
-          string.format("+ %3d | from %s", change.line_num, change.new_import)
+          string.format("+ %3d | %s", change.line_num, new_line)
         )
       end
 
@@ -301,14 +305,18 @@ function M.update_change_lines(state, change, old_status)
   local new_lines = {}
   local status_marker = ""
 
+  -- Use full_line if available, otherwise fallback to simplified format
+  local old_line = change.full_line or ("from " .. change.old_import)
+  local new_line = old_line:gsub(vim.pesc(change.old_import), change.new_import)
+
   if change.status == "accepted" then
     status_marker = " ✓"
     table.insert(
       new_lines,
       string.format(
-        "+ %3d | from %s%s",
+        "+ %3d | %s%s",
         change.line_num,
-        change.new_import,
+        new_line,
         status_marker
       )
     )
@@ -317,9 +325,9 @@ function M.update_change_lines(state, change, old_status)
     table.insert(
       new_lines,
       string.format(
-        "- %3d | from %s%s",
+        "- %3d | %s%s",
         change.line_num,
-        change.old_import,
+        old_line,
         status_marker
       )
     )
@@ -327,11 +335,11 @@ function M.update_change_lines(state, change, old_status)
     -- Pending: show both old and new for comparison
     table.insert(
       new_lines,
-      string.format("- %3d | from %s", change.line_num, change.old_import)
+      string.format("- %3d | %s", change.line_num, old_line)
     )
     table.insert(
       new_lines,
-      string.format("+ %3d | from %s", change.line_num, change.new_import)
+      string.format("+ %3d | %s", change.line_num, new_line)
     )
   end
 
