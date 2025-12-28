@@ -11,6 +11,44 @@ local function get_log()
   }
 end
 
+---Find the project root by searching for common markers
+---@param start_path string? Starting path (defaults to current buffer's directory)
+---@return string? Project root path
+function M.find_project_root(start_path)
+  start_path = start_path or fn.expand "%:p:h"
+  local current = Path:new(start_path)
+
+  -- Project root markers, in order of priority
+  local markers = {
+    ".git",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "Pipfile",
+    "poetry.lock",
+  }
+
+  -- Walk up the directory tree
+  while current do
+    for _, marker in ipairs(markers) do
+      local marker_path = current / marker
+      if marker_path:exists() then
+        return tostring(current)
+      end
+    end
+
+    local parent = current:parent()
+    if not parent or tostring(parent) == tostring(current) then
+      break
+    end
+    current = parent
+  end
+
+  -- Fallback to cwd if no markers found
+  return fn.getcwd()
+end
+
 ---Check if a directory is a git repository
 ---@param project_root string
 ---@return boolean

@@ -53,7 +53,7 @@ end
 function M.show_interactive_preview(old_name, new_name, project_root, options)
   local log = get_log()
   options = options or {}
-  project_root = project_root or fn.getcwd()
+  project_root = project_root or filesystem.find_project_root()
 
   local use_git = options.use_git
   if use_git == nil then

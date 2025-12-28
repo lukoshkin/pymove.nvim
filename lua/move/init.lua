@@ -24,7 +24,7 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
   local dry_run = options.dry_run or false
   local use_git = options.use_git
 
-  project_root = project_root or fn.getcwd()
+  project_root = project_root or filesystem.find_project_root()
 
   -- Auto-detect git if not specified
   if use_git == nil then
