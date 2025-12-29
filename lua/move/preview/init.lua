@@ -116,41 +116,71 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
     )
   end
 
-  -- Check for swap files before proceeding (unless ignored)
-  if not options.ignore_swap then
-    local swap_files = collector.check_swap_files(files)
-    if #swap_files > 0 then
-      local msg_lines = {
-        "Cannot proceed: The following files have active swap files.",
-        "Please close these files in other editors or remove their swap files:",
-        "",
-      }
-      for _, swap_info in ipairs(swap_files) do
-        table.insert(msg_lines, "  File: " .. swap_info.file)
-        table.insert(msg_lines, "  Swap: " .. swap_info.swap_path)
-        table.insert(msg_lines, "")
-      end
-      table.insert(msg_lines, "To remove swap files, you can:")
-      table.insert(
-        msg_lines,
-        "  1. Close the files in other Neovim instances/terminals"
-      )
-      table.insert(msg_lines, "  2. Delete the swap files manually if they're stale")
-      table.insert(
-        msg_lines,
-        "  3. Use :recover in Neovim to recover unsaved changes first"
-      )
-      table.insert(msg_lines, "")
-      table.insert(
-        msg_lines,
-        "Or use :PyMovePreview with --ignore-swap flag to bypass this check"
-      )
+  -- Check for swap files before proceeding
+  local swap_files = collector.check_swap_files(files)
+  if #swap_files > 0 then
+    -- Create a buffer to display swap file information
+    local swap_bufnr = vim.api.nvim_create_buf(false, true)
+    vim.bo[swap_bufnr].filetype = "text"
+    vim.bo[swap_bufnr].bufhidden = "wipe"
 
-      local full_msg = table.concat(msg_lines, "\n")
-      log.error(full_msg)
-      vim.notify(full_msg, vim.log.levels.ERROR)
+    local msg_lines = {
+      "WARNING: Active swap files detected",
+      "=" .. string.rep("=", 50),
+      "",
+      "The following files have active swap files:",
+      "",
+    }
+    for _, swap_info in ipairs(swap_files) do
+      table.insert(msg_lines, "File:     " .. swap_info.file)
+      table.insert(msg_lines, "Swap:     " .. swap_info.swap_path)
+      table.insert(msg_lines, "")
+    end
+    table.insert(msg_lines, string.rep("-", 50))
+    table.insert(msg_lines, "")
+    table.insert(msg_lines, "This may indicate:")
+    table.insert(
+      msg_lines,
+      "  • Files are open in other Neovim instances/terminals"
+    )
+    table.insert(msg_lines, "  • Previous editing sessions crashed")
+    table.insert(msg_lines, "")
+    table.insert(msg_lines, "Proceeding may cause conflicts or data loss.")
+    table.insert(msg_lines, "")
+
+    vim.api.nvim_buf_set_lines(swap_bufnr, 0, -1, false, msg_lines)
+    vim.bo[swap_bufnr].modifiable = false
+
+    -- Open in a split window
+    vim.cmd "split"
+    local swap_winid = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(swap_winid, swap_bufnr)
+    vim.api.nvim_win_set_height(swap_winid, math.min(#msg_lines + 1, 20))
+
+    -- Ask user if they want to proceed
+    local response = vim.fn.confirm(
+      "Active swap files detected. Do you want to proceed anyway?",
+      "&Yes\n&No",
+      2 -- Default to No
+    )
+
+    -- Close the info window
+    if vim.api.nvim_win_is_valid(swap_winid) then
+      vim.api.nvim_win_close(swap_winid, true)
+    end
+
+    if response ~= 1 then
+      log.info "User cancelled due to swap files"
+      vim.notify("Operation cancelled", vim.log.levels.INFO)
       return
     end
+
+    log.warn(
+      string.format(
+        "User chose to proceed despite %d swap files",
+        #swap_files
+      )
+    )
   end
 
   -- Setup highlights
@@ -211,6 +241,7 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
         new_name = new_name,
         project_root = project_root,
         use_git = use_git,
+        backup = options.backup or false,
         namespace = api.nvim_create_namespace "pymove-preview",
         truncated = truncated,
         total_files = #all_files,

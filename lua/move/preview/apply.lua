@@ -143,7 +143,8 @@ function M.apply_accepted_changes(state)
       local num_updates = refactor.update_specific_imports_direct(
         file,
         file_changes,
-        state.project_root
+        state.project_root,
+        state.backup
       )
       if num_updates and num_updates > 0 then
         updated_files = updated_files + 1

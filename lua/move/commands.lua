@@ -20,7 +20,7 @@ local function complete_python_paths(arglead, cmdline, curpos)
 
   -- For 3rd+ arguments, complete flags
   if arg_count >= 3 then
-    local flags = { "--no-git", "--git", "--ignore-swap" }
+    local flags = { "--no-git", "--git", "-b", "--backup" }
     return vim.tbl_filter(function(flag)
       return flag:find("^" .. vim.pesc(arglead))
     end, flags)
@@ -88,7 +88,7 @@ function M.setup(opts)
     local args = vim.split(cmd_opts.args, " ", { trimempty = true })
     if #args < 2 then
       vim.notify(
-        "Usage: :PyMovePreview <old_path> <new_path> [--no-git|--git] [--ignore-swap]",
+        "Usage: :PyMovePreview <old_path> <new_path> [--no-git|--git] [-b|--backup]",
         vim.log.levels.ERROR
       )
       return
@@ -102,8 +102,8 @@ function M.setup(opts)
         options.use_git = false
       elseif args[i] == "--git" then
         options.use_git = true
-      elseif args[i] == "--ignore-swap" then
-        options.ignore_swap = true
+      elseif args[i] == "-b" or args[i] == "--backup" then
+        options.backup = true
       end
     end
 

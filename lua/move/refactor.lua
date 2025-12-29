@@ -174,7 +174,8 @@ end
 ---@param file string Path to the file
 ---@param specific_changes table[] List of changes with file, line_num, old_import, new_import
 ---@param project_root string Project root directory
-function M.update_specific_imports_direct(file, specific_changes, project_root)
+---@param backup boolean? Whether to create backup files (default: false)
+function M.update_specific_imports_direct(file, specific_changes, project_root, backup)
   local log = get_log()
 
   if #specific_changes == 0 then
@@ -209,9 +210,11 @@ function M.update_specific_imports_direct(file, specific_changes, project_root)
   f:close()
 
   -- Apply patch using patch command (p0 = no path stripping)
+  local backup_flag = backup and "--backup" or "--no-backup"
   local cmd = string.format(
-    "cd %s && patch -s -p0 --backup-if-mismatch < %s",
+    "cd %s && patch -s -p0 %s < %s",
     vim.fn.shellescape(project_root),
+    backup_flag,
     vim.fn.shellescape(patch_file)
   )
   local result = fn.system(cmd)
@@ -349,7 +352,8 @@ end
 ---@param old_dotted_name string Old import path
 ---@param new_dotted_name string New import path
 ---@param project_root string Project root directory
-function M.update_imports_direct(file, old_dotted_name, new_dotted_name, project_root)
+---@param backup boolean? Whether to create backup files (default: false)
+function M.update_imports_direct(file, old_dotted_name, new_dotted_name, project_root, backup)
   local log = get_log()
 
   -- Use buffer to find changes with treesitter
@@ -464,9 +468,11 @@ function M.update_imports_direct(file, old_dotted_name, new_dotted_name, project
   f:close()
 
   -- Apply patch using patch command (p0 = no path stripping)
+  local backup_flag = backup and "--backup" or "--no-backup"
   local cmd = string.format(
-    "cd %s && patch -s -p0 --backup-if-mismatch < %s",
+    "cd %s && patch -s -p0 %s < %s",
     vim.fn.shellescape(project_root),
+    backup_flag,
     vim.fn.shellescape(patch_file)
   )
   local result = fn.system(cmd)
