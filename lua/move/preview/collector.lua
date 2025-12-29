@@ -11,6 +11,53 @@ local log = require("plenary.log").new {
   use_console = true,
 }
 
+---Check if a file has an active swap file
+---@param filepath string File path to check
+---@return boolean has_swap True if swap file exists
+---@return string? swap_path Path to swap file if it exists
+local function has_swap_file(filepath)
+  -- Expand to absolute path
+  local abs_path = vim.fn.fnamemodify(filepath, ":p")
+
+  -- Get Neovim's swap directory
+  local swap_dir = vim.fn.stdpath "state" .. "/swap"
+
+  -- Neovim encodes file paths in swap file names by replacing / with %
+  -- e.g., /home/user/file.py -> %home%user%file.py.swp
+  local encoded_path = abs_path:gsub("/", "%%")
+
+  -- Check for swap files with various extensions (.swp, .swo, .swn, etc.)
+  local swap_extensions = { "swp", "swo", "swn", "swm", "swl", "swk" }
+
+  for _, ext in ipairs(swap_extensions) do
+    local swap_path = string.format("%s/%s.%s", swap_dir, encoded_path, ext)
+    if vim.fn.filereadable(swap_path) == 1 then
+      return true, swap_path
+    end
+  end
+
+  return false, nil
+end
+
+---Check all files for swap files
+---@param files string[] List of file paths to check
+---@return table[] swap_files List of {file, swap_path} for files with swaps
+function M.check_swap_files(files)
+  local swap_files = {}
+
+  for _, file in ipairs(files) do
+    local has_swap, swap_path = has_swap_file(file)
+    if has_swap then
+      table.insert(swap_files, {
+        file = file,
+        swap_path = swap_path,
+      })
+    end
+  end
+
+  return swap_files
+end
+
 local function get_cached_query(lang, query_string)
   local cache_key = lang .. ":" .. query_string
   query_cache[cache_key] = query_cache[cache_key]
@@ -34,7 +81,20 @@ function M.process_file_changes(
   local changes = {}
 
   local bufnr = fn.bufadd(file)
-  fn.bufload(bufnr)
+
+  -- Suppress swap file prompts during buffer load
+  local old_shortmess = vim.o.shortmess
+  vim.o.shortmess = vim.o.shortmess .. "A"
+
+  local load_success = pcall(fn.bufload, bufnr)
+
+  -- Restore original shortmess setting
+  vim.o.shortmess = old_shortmess
+
+  if not load_success then
+    log.warn("Failed to load buffer for file: " .. file)
+    return changes
+  end
 
   local success, parser = pcall(vim.treesitter.get_parser, bufnr, "python")
   if not success then

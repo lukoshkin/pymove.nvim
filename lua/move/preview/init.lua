@@ -116,6 +116,43 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
     )
   end
 
+  -- Check for swap files before proceeding (unless ignored)
+  if not options.ignore_swap then
+    local swap_files = collector.check_swap_files(files)
+    if #swap_files > 0 then
+      local msg_lines = {
+        "Cannot proceed: The following files have active swap files.",
+        "Please close these files in other editors or remove their swap files:",
+        "",
+      }
+      for _, swap_info in ipairs(swap_files) do
+        table.insert(msg_lines, "  File: " .. swap_info.file)
+        table.insert(msg_lines, "  Swap: " .. swap_info.swap_path)
+        table.insert(msg_lines, "")
+      end
+      table.insert(msg_lines, "To remove swap files, you can:")
+      table.insert(
+        msg_lines,
+        "  1. Close the files in other Neovim instances/terminals"
+      )
+      table.insert(msg_lines, "  2. Delete the swap files manually if they're stale")
+      table.insert(
+        msg_lines,
+        "  3. Use :recover in Neovim to recover unsaved changes first"
+      )
+      table.insert(msg_lines, "")
+      table.insert(
+        msg_lines,
+        "Or use :PyMovePreview with --ignore-swap flag to bypass this check"
+      )
+
+      local full_msg = table.concat(msg_lines, "\n")
+      log.error(full_msg)
+      vim.notify(full_msg, vim.log.levels.ERROR)
+      return
+    end
+  end
+
   -- Setup highlights
   window.setup_highlights()
 

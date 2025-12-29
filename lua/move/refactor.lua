@@ -210,7 +210,7 @@ function M.update_specific_imports_direct(file, specific_changes, project_root)
 
   -- Apply patch using patch command (p0 = no path stripping)
   local cmd = string.format(
-    "cd %s && patch -s -p0 < %s",
+    "cd %s && patch -s -p0 --backup-if-mismatch < %s",
     vim.fn.shellescape(project_root),
     vim.fn.shellescape(patch_file)
   )
@@ -235,7 +235,20 @@ end
 function M.update_specific_imports(file, specific_changes, project_root)
   local log = get_log()
   local bufnr = fn.bufadd(file)
-  fn.bufload(bufnr)
+
+  -- Suppress swap file prompts during buffer load
+  local old_shortmess = vim.o.shortmess
+  vim.o.shortmess = vim.o.shortmess .. "A"
+
+  local load_success = pcall(fn.bufload, bufnr)
+
+  -- Restore original shortmess setting
+  vim.o.shortmess = old_shortmess
+
+  if not load_success then
+    log.warn("Failed to load buffer for file: " .. file)
+    return 0
+  end
 
   -- Add error handling for treesitter parsing
   local success, parser = pcall(vim.treesitter.get_parser, bufnr, "python")
@@ -341,7 +354,25 @@ function M.update_imports_direct(file, old_dotted_name, new_dotted_name, project
 
   -- Use buffer to find changes with treesitter
   local bufnr = fn.bufadd(file)
-  fn.bufload(bufnr)
+
+  -- Suppress swap file prompts during buffer load
+  local old_shortmess = vim.o.shortmess
+  vim.o.shortmess = vim.o.shortmess .. "A"
+
+  local load_success = pcall(fn.bufload, bufnr)
+
+  -- Restore original shortmess setting
+  vim.o.shortmess = old_shortmess
+
+  if not load_success then
+    log.warn("Failed to load buffer for file: " .. file)
+    if api.nvim_buf_is_valid(bufnr) and api.nvim_buf_is_loaded(bufnr) then
+      pcall(vim.api.nvim_buf_call, bufnr, function()
+        vim.cmd("silent! bunload!")
+      end)
+    end
+    return 0
+  end
 
   local success, parser = pcall(vim.treesitter.get_parser, bufnr, "python")
   if not success then
@@ -434,7 +465,7 @@ function M.update_imports_direct(file, old_dotted_name, new_dotted_name, project
 
   -- Apply patch using patch command (p0 = no path stripping)
   local cmd = string.format(
-    "cd %s && patch -s -p0 < %s",
+    "cd %s && patch -s -p0 --backup-if-mismatch < %s",
     vim.fn.shellescape(project_root),
     vim.fn.shellescape(patch_file)
   )
@@ -459,7 +490,20 @@ end
 function M.update_imports(file, old_dotted_name, new_dotted_name, project_root)
   local log = get_log()
   local bufnr = fn.bufadd(file)
-  fn.bufload(bufnr)
+
+  -- Suppress swap file prompts during buffer load
+  local old_shortmess = vim.o.shortmess
+  vim.o.shortmess = vim.o.shortmess .. "A"
+
+  local load_success = pcall(fn.bufload, bufnr)
+
+  -- Restore original shortmess setting
+  vim.o.shortmess = old_shortmess
+
+  if not load_success then
+    log.warn("Failed to load buffer for file: " .. file)
+    return 0
+  end
 
   -- Add error handling for treesitter parsing
   local success, parser = pcall(vim.treesitter.get_parser, bufnr, "python")
