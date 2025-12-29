@@ -22,6 +22,9 @@ end
 ---@return string
 function M.path_to_dotted_name(input)
   local chopped = input:gsub("%.py$", "")
+  -- Strip trailing slashes
+  chopped = chopped:gsub("/+$", "")
+
   if
     chopped:find "\\"
     or input:find "/" and chopped:find "%."
