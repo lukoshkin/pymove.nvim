@@ -10,6 +10,21 @@ local log = require("plenary.log").new {
   use_console = true,
 }
 
+---Rewrite a path that lived under the moved source into its new location
+---@param file_path string
+---@param old_root string Absolute path the move started from
+---@param new_root string Absolute path the move landed on
+---@return string
+local function remap_moved_path(file_path, old_root, new_root)
+  if file_path == old_root then
+    return new_root
+  end
+  if file_path:sub(1, #old_root + 1) == old_root .. "/" then
+    return new_root .. file_path:sub(#old_root + 1)
+  end
+  return file_path
+end
+
 local function notify_error_and_close(message, state)
   log.error(message)
   vim.notify(message, vim.log.levels.ERROR)
@@ -124,15 +139,15 @@ function M.apply_accepted_changes(state)
   else
     log.info "File move operation declined"
   end
-  local updated_files = 0
+  local updated_files, updated_imports, failed_files = 0, 0, 0
   if #accepted_imports > 0 then
     local old_path_str, new_path_str = tostring(old_path), tostring(new_path)
     local changes_by_file = {}
 
     for _, change in ipairs(accepted_imports) do
       local file_path = change.file
-      if move_accepted and file_path:sub(1, #old_path_str) == old_path_str then
-        file_path = new_path_str .. file_path:sub(#old_path_str + 1)
+      if move_accepted then
+        file_path = remap_moved_path(file_path, old_path_str, new_path_str)
       end
 
       changes_by_file[file_path] = changes_by_file[file_path] or {}
@@ -145,12 +160,20 @@ function M.apply_accepted_changes(state)
         file_changes,
         state.project_root,
         state.backup
-      )
-      if num_updates and num_updates > 0 then
+      ) or 0
+      if num_updates > 0 then
         updated_files = updated_files + 1
+        updated_imports = updated_imports + num_updates
+      end
+      if num_updates < #file_changes then
+        failed_files = failed_files + 1
       end
     end
+
+    -- Files were rewritten on disk; refresh any buffers holding stale copies
+    vim.cmd "silent! checktime"
   end
+
   local msg_parts = {}
   if move_accepted then
     table.insert(
@@ -162,16 +185,27 @@ function M.apply_accepted_changes(state)
     table.insert(
       msg_parts,
       string.format(
-        "updated %d imports in %d files",
+        "updated %d of %d imports in %d files",
+        updated_imports,
         #accepted_imports,
         updated_files
       )
     )
   end
-  local success_msg = "✓ " .. table.concat(msg_parts, " and ")
 
-  log.info(success_msg)
-  vim.notify(success_msg, vim.log.levels.INFO)
+  if failed_files > 0 then
+    local failure_msg = string.format(
+      "%s (%d file(s) failed -- see :messages for details)",
+      table.concat(msg_parts, " and "),
+      failed_files
+    )
+    log.error(failure_msg)
+    vim.notify(failure_msg, vim.log.levels.ERROR)
+  else
+    local success_msg = "✓ " .. table.concat(msg_parts, " and ")
+    log.info(success_msg)
+    vim.notify(success_msg, vim.log.levels.INFO)
+  end
 
   api.nvim_win_close(state.winid, true)
 end

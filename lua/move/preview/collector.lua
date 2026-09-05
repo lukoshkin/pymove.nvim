@@ -118,7 +118,10 @@ function M.process_file_changes(
     (import_from_statement
       module_name: (dotted_name) @module_name)
     (import_statement
-      (dotted_name) @module_name)
+      name: (dotted_name) @module_name)
+    (import_statement
+      name: (aliased_import
+        name: (dotted_name) @module_name))
   ]]
   local query_obj = get_cached_query("python", query_string)
 
@@ -136,8 +139,8 @@ function M.process_file_changes(
           name = utils.absolute_dotted_path(rel_path, name)
         end
 
-        if name:find("^" .. old_dotted) then
-          local new_import = name:gsub("^" .. old_dotted, new_dotted)
+        local new_import = utils.rename_dotted_prefix(name, old_dotted, new_dotted)
+        if new_import then
           local start_row, start_col, end_row, end_col = node:range()
 
           local total_lines = api.nvim_buf_line_count(bufnr)

@@ -38,8 +38,26 @@ function M.path_to_dotted_name(input)
     local chopped = chopped:gsub("/", ".")
     return chopped
   else
-    return input
+    return chopped
   end
+end
+
+---Rename a dotted import path if it refers to the moved module
+---
+---Matching is done on whole dotted components, so `src.utils` renames
+---`src.utils` and `src.utils.deep` but leaves `src.utils_legacy` alone.
+---@param name string Dotted name as written in the source
+---@param old_dotted string Dotted name of the module being moved
+---@param new_dotted string Dotted name of its destination
+---@return string? renamed Nil when `name` does not refer to the moved module
+function M.rename_dotted_prefix(name, old_dotted, new_dotted)
+  if name == old_dotted then
+    return new_dotted
+  end
+  if name:sub(1, #old_dotted + 1) == old_dotted .. "." then
+    return new_dotted .. name:sub(#old_dotted + 1)
+  end
+  return nil
 end
 
 ---Convert a relative dotted import path to an absolute one

@@ -88,7 +88,9 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
   local old_path_str = tostring(old_path)
   local new_path_str = tostring(new_path)
   for i, file in ipairs(files) do
-    if file:sub(1, #old_path_str) == old_path_str then
+    if file == old_path_str then
+      files[i] = new_path_str
+    elseif file:sub(1, #old_path_str + 1) == old_path_str .. "/" then
       files[i] = new_path_str .. file:sub(#old_path_str + 1)
     end
   end

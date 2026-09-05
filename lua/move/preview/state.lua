@@ -3,6 +3,34 @@ local highlight = require "move.preview.highlight"
 
 local M = {}
 
+---Render an import line the way `apply` will actually rewrite it
+---
+---Mirrors `rewrite_import_lines` in 'lua/move/refactor.lua': only the
+---treesitter range of the module name is replaced, so comments, aliases and
+---other imports on the same line stay untouched in the preview too.
+---@param change table ChangePreview
+---@return string old_line
+---@return string new_line
+local function render_import_lines(change)
+  local old_line = change.full_line or ("from " .. change.old_import)
+  local range = change.node_range
+
+  if change.full_line and range and range[1] == range[3] then
+    local from, to = range[2], range[4]
+    if old_line:sub(from + 1, to) == change.old_import then
+      return old_line,
+        old_line:sub(1, from) .. change.new_import .. old_line:sub(to + 1)
+    end
+  end
+
+  local new_line = old_line:gsub(
+    vim.pesc(change.old_import),
+    (change.new_import:gsub("%%", "%%%%")),
+    1
+  )
+  return old_line, new_line
+end
+
 ---Build the preview buffer with all changes
 ---@param state table PreviewState
 function M.build_preview_buffer(state)
@@ -154,9 +182,7 @@ function M.build_preview_buffer(state)
       end
 
       -- Show import diff based on status
-      -- Use full_line if available, otherwise fallback to simplified format
-      local old_line = change.full_line or ("from " .. change.old_import)
-      local new_line = old_line:gsub(vim.pesc(change.old_import), change.new_import)
+      local old_line, new_line = render_import_lines(change)
 
       if change.status == "accepted" then
         table.insert(
@@ -305,9 +331,7 @@ function M.update_change_lines(state, change, old_status)
   local new_lines = {}
   local status_marker = ""
 
-  -- Use full_line if available, otherwise fallback to simplified format
-  local old_line = change.full_line or ("from " .. change.old_import)
-  local new_line = old_line:gsub(vim.pesc(change.old_import), change.new_import)
+  local old_line, new_line = render_import_lines(change)
 
   if change.status == "accepted" then
     status_marker = " ✓"
