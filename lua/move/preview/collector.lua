@@ -97,8 +97,12 @@ function M.process_file_changes(
   end
 
   local success, parser = pcall(vim.treesitter.get_parser, bufnr, "python")
-  if not success then
-    log.warn("Failed to get parser for file: " .. file)
+  if not success or not parser then
+    log.warn(
+      "Python treesitter parser unavailable, skipping "
+        .. file
+        .. " -- run :TSInstall python to install it"
+    )
     return changes
   end
 
