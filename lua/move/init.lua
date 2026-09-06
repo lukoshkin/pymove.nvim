@@ -27,6 +27,7 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
   local use_git = options.use_git
 
   project_root = project_root or filesystem.find_project_root()
+  filesystem.reset_root_cache()
 
   -- Auto-detect git if not specified
   if use_git == nil then
@@ -55,16 +56,17 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
     return false, err
   end
 
-  -- Calculate import path changes
-  local old_dotted = utils.path_to_dotted_name(old_name)
-  local new_dotted = utils.path_to_dotted_name(new_name)
+  -- Calculate import path changes. Dotted names come from each side's import
+  -- root, not the filesystem root the paths are given against
+  local names = filesystem.resolve_move_names(project_root, old_name, new_name)
+  local old_dotted, new_dotted = names.old_dotted, names.new_dotted
   local change = utils.estimate_change(old_dotted, new_dotted)
   local pattern = utils.file_change_pattern(change, old_dotted)
   local files = refactor.find_files_with_pattern(pattern, project_root, "*.py")
+  report.warn_rival_spellings(names.rivals, new_dotted)
   local strategy = report.resolve_strategy(
     config.options.move.relative_imports,
-    project_root,
-    new_name
+    names.inferred
   )
 
   if dry_run then

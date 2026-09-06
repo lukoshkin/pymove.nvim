@@ -6,8 +6,6 @@
 ---those too -- interactively with `:cdo`, or with an external tool reading the
 ---emitted file.
 
-local filesystem = require "move.filesystem"
-
 local M = {}
 
 local log = require("plenary.log").new {
@@ -15,39 +13,66 @@ local log = require("plenary.log").new {
   use_console = true,
 }
 
----Pick the relative-import spelling that will actually import
+---Report an import root nothing in the project confirmed, and pick a spelling
 ---
----An absolute dotted name is only importable when every directory between the
----project root and the module is a package. In a src layout it is not: the root
----is found by `pyproject.toml` one level above `src/`, so `src.mypkg.helpers`
----names nothing. Rather than write a line that cannot run, keep such imports
----relative and say why.
+---A directory holding modules but no `__init__.py` reads two ways -- a source
+---root, whose contents are top-level, or a PEP 420 namespace package, whose name
+---is part of every dotted name below it -- and only `sys.path` separates them.
+---Normally the codebase settles it: some import already spells the module one
+---way or the other. When none does, the package chain is all there is, so say
+---which reading was taken -- and point at `move.import_root`, which settles it
+---outright -- while keeping the move relative where it can be, since a relative
+---import is right under either reading.
 ---@param configured "absolute"|"preserve"
----@param project_root string
----@param new_rel_path string Destination path relative to the project root
+---@param inferred_roots string[] Import roots no import in the project confirmed
 ---@return "absolute"|"preserve" strategy
-function M.resolve_strategy(configured, project_root, new_rel_path)
-  if configured ~= "absolute" then
+function M.resolve_strategy(configured, inferred_roots)
+  if #inferred_roots == 0 then
     return configured
   end
 
-  local offender = filesystem.first_non_package_dir(project_root, new_rel_path)
-  if not offender then
-    return "absolute"
-  end
-
   local msg = string.format(
-    "`%s/` has no __init__.py, so an absolute import of %s would not resolve.\n"
-      .. "Keeping relative imports relative (relative_imports=\"preserve\" for "
-      .. "this move).\nImports with no relative form are still written "
-      .. "absolutely -- check those.",
-    offender,
-    new_rel_path
+    "Nothing in the project imports anything under `%s`, so its role could not "
+      .. "be read off the code. Treating it as an import root, which names its "
+      .. "contents as top-level modules; if it is a PEP 420 namespace package "
+      .. "instead, every dotted name here is one component short.\nSet "
+      .. "`move.import_root` to say which, and this stops being a guess.",
+    table.concat(inferred_roots, "`, `")
   )
+  if configured == "absolute" then
+    msg = msg
+      .. "\nFalling back to relative_imports=\"preserve\" for this move, since "
+      .. "a relative import is right under either reading. Imports with no "
+      .. "relative form are still written absolutely; check those."
+  end
   log.warn(msg)
   vim.notify(msg, vim.log.levels.WARN)
 
-  return "preserve"
+  return configured == "absolute" and "preserve" or configured
+end
+
+---Report spellings of the moved module that this pass will not touch
+---
+---A project that names the same module two ways -- `mypkg.utils` in the package,
+---`src.mypkg.utils` in tests that run from the repo root -- has two sets of
+---imports that both have to keep working. Only the more common one is rewritten,
+---so name the other rather than leave it quietly stale.
+---@param rivals string[] Dotted spellings the project also uses
+---@param new_dotted string What the winning spelling was rewritten to
+function M.warn_rival_spellings(rivals, new_dotted)
+  if #rivals == 0 then
+    return
+  end
+
+  local msg = string.format(
+    "The project also imports this module as `%s`, which this move does not "
+      .. "rewrite -- only the more common spelling (`%s`) was. Search for the "
+      .. "others and fix them by hand, or set `move.import_root` and run again.",
+    table.concat(rivals, "`, `"),
+    new_dotted
+  )
+  log.warn(msg)
+  vim.notify(msg, vim.log.levels.WARN)
 end
 
 ---@param entries table[] {file, line_num, aliased_name, aliased_to}

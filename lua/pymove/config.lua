@@ -10,6 +10,7 @@
 
 ---@class MoveConfig
 ---@field use_git boolean|nil Auto-detect git by default
+---@field import_root string|nil Directory dotted names start from (nil = infer)
 ---@field relative_imports "absolute"|"preserve" How to rewrite relative imports
 ---@field keymaps table<string, string>|false Keymaps for moving (false to disable)
 
@@ -62,6 +63,13 @@ M.defaults = {
   move = {
     -- Git integration (nil = auto-detect)
     use_git = nil,
+
+    -- Directory that dotted names are counted from, relative to the project
+    -- root -- "src" for a src layout, "" for the project root itself.
+    -- nil infers it from how the codebase already spells its imports, which
+    -- is right whenever any absolute import of the module exists. Set this
+    -- when pymove says it could not tell.
+    import_root = nil,
 
     -- How to rewrite an import that was written relatively
     --   "absolute" - always emit a full dotted path

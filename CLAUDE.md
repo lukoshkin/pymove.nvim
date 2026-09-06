@@ -60,7 +60,7 @@ The plugin is organized into three main Lua modules:
    - `imports.lua` - Treesitter import matching, shared by the preview and the
      direct path (see "Import Forms Handled")
    - `refactor.lua` - Import update logic using ripgrep
-   - `filesystem.lua` - File operations and git integration
+   - `filesystem.lua` - Import-root resolution, file operations, git integration
    - `utils.lua` - Path/module name conversions
    - `commands.lua` - Vim command registration
    - `preview/` - Interactive preview UI subsystem
@@ -120,6 +120,9 @@ Modify `lua/sort/sorter.lua`:
 ### Extending Refactoring
 
 To add new refactoring patterns:
+- Naming in `lua/move/filesystem.lua` (`resolve_move_names()`) -- the one place
+  a path becomes a dotted name, and the only place the import root is decided.
+  `move.import_root` overrides the inference outright.
 - File discovery in `lua/move/utils.lua` (see `file_change_pattern()`) -- regex
   passed to ripgrep. Over-matching only costs a parse; under-matching means a
   silently stale import, so err wide.
@@ -164,16 +167,58 @@ already binding-safe. Every synthesized alias is reported through
 `lua/move/report.lua` -- a quickfix list (`:copen`, then `:cdo`) plus a
 `$TMPDIR/pymove-aliases-*.txt` file of `file:line:old:new` for external tools.
 
-**Absolute spelling is gated on the package chain.** Dotted names are derived
-from the path relative to the project root, but that root is found by `.git` /
-`pyproject.toml`, which in a src layout sits one level above the importable
-package -- so `src/mypkg/utils.py` is called `src.mypkg.utils` while Python
-knows it as `mypkg.utils`. `report.resolve_strategy()` checks every directory
-between the root and the module for `__init__.py`; when the chain is broken it
-falls back to `"preserve"` for that move and says why, rather than writing an
-import that cannot resolve. Imports with no relative form are still written
-absolutely and are called out in the same warning. Proper import-root detection
-is tracked separately in issue #3.
+**Dotted names come from the import root, not the filesystem root.** Two
+different roots are in play and must not be confused. The *filesystem* root
+(`filesystem.find_project_root()`, found by `.git` / `pyproject.toml`) scopes
+ripgrep and is what command arguments are given against -- those stay paths,
+because they tab-complete and say plainly whether a target is a module or a
+package. The *import* root is where Python starts counting the name, and in a
+src layout it is `src/`, one level below.
+
+**The import root is read off the code, not guessed from the tree.** The package
+chain cannot settle it: `src/mypkg/` and a PEP 420 `ns/pkg/` are identical on
+disk, and only `sys.path` separates them. What does settle it is how the project
+already spells modules there. `filesystem.find_import_root()` scores each
+candidate root by how many imports actually use its spelling, and takes the most
+frequent. A codebase writing `from mypkg.utils import f` names
+`src/mypkg/utils.py` as `mypkg.utils`; one whose tests write
+`from src.mypkg.utils import f` names the same file `src.mypkg.utils`. Both are
+right, because both match what has to keep working.
+
+Two things keep the count honest. **Candidates stop at the first package**: a
+directory carrying an `__init__.py` is part of a name, never where one starts,
+and nothing inside a package can be a root either. Without that stop
+`mypkg/logging.py` would offer `mypkg` as a candidate whose spelling is the bare
+name `logging`, and every `import logging` in the project would vote for it.
+**Neighbours are probes too**: a module nobody imports yet carries no evidence,
+but the files beside it share its directory and therefore its root, so
+`probe_modules()` scores the whole directory rather than one file.
+
+Each side of a move resolves its own root (`filesystem.resolve_move_names()`),
+since moving out of `src/` into a flat package changes the root on the way. The
+destination has no imports of its own to be recognised by, so it is named from
+whatever a module already living around it is named from, and inherits the
+source's root when nothing lives there yet. Importers resolve their own root too
+(`filesystem.import_relative_path()`), because the relative-import arithmetic in
+`utils.absolute_dotted_path()` / `utils.relative_dotted_path()` counts package
+components from it -- but `import_relative_path()` never searches. An importer
+under a root already settled for the move is named from it, and anything outside
+falls back to the package chain: asking how often the project imports a test
+module would cost a scan per directory to learn nothing, since nothing imports
+it. A move therefore costs one scan per candidate root, not per file.
+`filesystem.reset_root_cache()` clears both the per-directory memo and the
+settled roots at the start of each operation, and the settled roots are tagged
+with the project they came from so a second project in the same session cannot
+inherit them.
+
+**When no import settles it**, the package chain is the only evidence left:
+`structural_import_root()` takes the parent of the topmost ancestor carrying an
+`__init__.py`, since a source root's parent is never itself a package, and the
+project root when no ancestor is a package at all. That reading is flagged, and
+`report.resolve_strategy()` says which way it went, points at `move.import_root`
+-- set it to `"src"`, or `""` for the project root, to settle the question
+outright -- and falls back to `"preserve"` for the move, since a relative import
+is right under either reading.
 
 **Relative-import spelling** is controlled by `move.relative_imports`
 (`"absolute"` by default, `"preserve"` to keep a relative form when a valid one
@@ -186,7 +231,7 @@ same either way.
 and as a warning listing `file:line` on the non-preview path):
 - `from . import a, utils` -- only one name should move; split it first.
 - A `from . import ...` statement spanning several lines.
-- A move that lands the module at the project root, where `from X import Y`
+- A move that lands the module at the import root, where `from X import Y`
   would have to become `import Y`.
 
 **Not handled** (silently skipped, no user warning):
@@ -194,10 +239,15 @@ and as a warning listing `file:line` on the non-preview path):
   `pkg` is a package rather than a relative prefix -- see issue #2. The relative
   form (`from . import module`) *is* handled; `utils.rename_from_import()` is
   the shared seam that issue #2 extends.
-- Dotted names are derived from the filesystem root rather than the import
-  root, so a src layout names `src/mypkg/utils.py` as `src.mypkg.utils` instead
-  of `mypkg.utils` -- issue #3. `resolve_strategy()` guards the rewrite; it does
-  not fix discovery or matching.
+- A project that spells the same module two ways -- `mypkg.utils` inside the
+  package, `src.mypkg.utils` in tests run from the repo root. Only the more
+  common spelling is rewritten; the other is named by
+  `report.warn_rival_spellings()` and left for a hand edit or a second run with
+  `move.import_root` set. Discovery is built from the winning spelling, so those
+  files are never even collected.
+- Vendored trees. `count_spellings()` scans whatever ripgrep walks, and outside
+  a git repo a non-hidden `vendor/` or `venv/` is not ignored, so its imports
+  vote on the root alongside the project's own.
 - The moved code's own outward relative imports. Moving `src/pkg` to
   `other/pkg` leaves `from ..util import f` inside it pointing at the old
   parent, and moving the single module `src/utils.py` to `other/helpers.py`
@@ -206,12 +256,22 @@ and as a warning listing `file:line` on the non-preview path):
 
 ### Testing Changes
 
-Python test files in `src/test_data.py` and `test_sorting.py` contain example code for testing sorting behavior:
-- Mixed module-level and class-level code
-- Dependency chains between functions
-- Various method naming conventions
+**Move/import rewriting** has an automated suite -- `nvim -l tests/run.lua`,
+exit status 0 only when everything passes. It writes a throwaway Python project
+per case, runs real moves against it, and checks the result by importing the
+rewritten tree with `python3`, which is the only authority on whether a rewrite
+was right. `tests/README.md` explains what each fixture layout is for; the short
+version is that they are not variety but the specific shapes that broke a
+version of the import-root rules, several of them pairs no rule can separate
+from the directory tree alone.
 
-Run sorting commands on these files to verify behavior.
+When a move bug turns up, add the layout that reproduces it to
+`tests/fixtures.lua` first, and confirm the new assertion fails against the
+unfixed code -- an assertion that cannot fail is worse than none.
+
+**Sorting** has no automated suite. `src/test_data.py` and `test_sorting.py`
+hold example code -- mixed module- and class-level definitions, dependency
+chains, various naming conventions -- to run the sort commands against by hand.
 
 ### Preview Window Internals
 
@@ -297,6 +357,13 @@ lua/
         ├── keymaps.lua
         └── highlight.lua
 
-src/                 # Python test data
+tests/               # Move/import test suite (nvim -l tests/run.lua)
+├── run.lua
+├── helpers.lua
+├── fixtures.lua     # Project layouts, one per shape that broke a rule
+├── import_root_spec.lua
+└── move_spec.lua
+
+src/                 # Python test data for sorting
 test_sorting.py      # Test file for sorting
 ```

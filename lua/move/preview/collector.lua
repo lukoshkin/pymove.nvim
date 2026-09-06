@@ -1,6 +1,6 @@
 local api = vim.api
 local fn = vim.fn
-local Path = require "plenary.path"
+local filesystem = require "move.filesystem"
 local imports = require "move.imports"
 
 local M = {}
@@ -100,7 +100,7 @@ function M.process_file_changes(
     return changes
   end
 
-  local rel_path = Path:new(file):make_relative(project_root)
+  local rel_path = filesystem.import_relative_path(project_root, file)
   local ok, matches =
     pcall(imports.find_matches, bufnr, rel_path, old_dotted, new_dotted)
   if not ok then

@@ -57,6 +57,7 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
   local log = get_log()
   options = options or {}
   project_root = project_root or filesystem.find_project_root()
+  filesystem.reset_root_cache()
 
   local use_git = options.use_git
   if use_git == nil then
@@ -87,15 +88,16 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
 
   -- File limit to prevent processing too many files at once
   local max_files = options.max_files or 200
+
+  -- Collect files that might need updates. Dotted names come from each side's
+  -- import root, not the filesystem root the paths are given against
+  local names = filesystem.resolve_move_names(project_root, old_name, new_name)
+  local old_dotted, new_dotted = names.old_dotted, names.new_dotted
+  report.warn_rival_spellings(names.rivals, new_dotted)
   local strategy = report.resolve_strategy(
     options.relative_imports or config.options.move.relative_imports,
-    project_root,
-    new_name
+    names.inferred
   )
-
-  -- Collect files that might need updates
-  local old_dotted = utils.path_to_dotted_name(old_name)
-  local new_dotted = utils.path_to_dotted_name(new_name)
   local change = utils.estimate_change(old_dotted, new_dotted)
   local pattern = utils.file_change_pattern(change, old_dotted)
   local all_files =

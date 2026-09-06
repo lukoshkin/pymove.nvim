@@ -177,7 +177,7 @@ local function collect_name_rename(ctx, matches)
         end
         if new_prefix == "" then
           mark_unfixable(
-            "`" .. new_name .. "` now lives at the project root; use `import "
+            "`" .. new_name .. "` now lives at the import root; use `import "
               .. new_name
               .. "` instead"
           )
@@ -290,7 +290,7 @@ end
 
 ---Find every import in a parsed buffer that refers to the moved module
 ---@param bufnr integer
----@param importer_rel_path string Buffer's path relative to the project root
+---@param importer_rel_path string Buffer's path relative to its import root
 ---@param old_dotted string Dotted name of the module being moved
 ---@param new_dotted string Dotted name of its destination
 ---@return ImportMatch[]

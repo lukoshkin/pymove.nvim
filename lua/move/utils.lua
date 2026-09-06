@@ -40,6 +40,24 @@ function M.path_to_dotted_name(input)
   end
 end
 
+---Re-express a project-relative path relatively to an import root
+---
+---Dotted names are derived from the import root, not the filesystem root, so a
+---src layout names `src/mypkg/utils.py` as `mypkg.utils`.
+---@param rel_path string Path relative to the project root
+---@param import_root string Import root relative to the project root, "" for the root itself
+---@return string
+function M.strip_root(rel_path, import_root)
+  local trimmed = rel_path:gsub("/+$", "")
+  if import_root == "" then
+    return trimmed
+  end
+  if trimmed:sub(1, #import_root + 1) == import_root .. "/" then
+    return trimmed:sub(#import_root + 2)
+  end
+  return trimmed
+end
+
 ---Rename a dotted import path if it refers to the moved module
 ---
 ---Matching is done on whole dotted components, so `src.utils` renames
@@ -60,9 +78,9 @@ end
 
 ---Package components of the module living at `rel_path`
 ---
----`src/pkg/a.py` lives in package `src.pkg`, so this returns `{"src", "pkg"}`.
----A module at the project root has no package and yields an empty list.
----@param rel_path string Path relative to the project root
+---`pkg/sub/a.py` lives in package `pkg.sub`, so this returns `{"pkg", "sub"}`.
+---A module sitting at the import root has no package and yields an empty list.
+---@param rel_path string Path relative to the import root
 ---@return string[]
 function M.package_parts(rel_path)
   local dir = rel_path:gsub("/+$", ""):match "^(.*)/[^/]*$"
@@ -92,7 +110,7 @@ end
 ---
 ---Resolution follows Python: one dot means the importer's own package, each
 ---further dot climbs one package above it.
----@param rel_path string Importer path relative to the project root
+---@param rel_path string Importer path relative to its import root
 ---@param rel_dotted_path string Relative import path (e.g. ".module", "..pkg.mod")
 ---@return string Absolute dotted path
 function M.absolute_dotted_path(rel_path, rel_dotted_path)
@@ -103,9 +121,11 @@ function M.absolute_dotted_path(rel_path, rel_dotted_path)
 
   local suffix = rel_dotted_path:sub(#dots + 1)
   local parts = M.package_parts(rel_path)
+  -- A climb that consumes every package component lands outside the top-level
+  -- package, which CPython rejects outright rather than resolving
   local climb = #dots - 1
-  if climb > #parts then
-    error "The rel_dotted_path leads outside of the project!"
+  if climb >= #parts then
+    error "The rel_dotted_path leads outside of the top-level package!"
   end
 
   local base = table.concat(vim.list_slice(parts, 1, #parts - climb), ".")
@@ -121,8 +141,8 @@ end
 ---Express an absolute dotted path relatively to the importer's package
 ---
 ---Returns nil when no valid relative form exists -- that is, when reaching the
----target would mean climbing above the project root, which is not a package.
----@param importer_rel_path string Importer path relative to the project root
+---target would mean climbing above the import root, which is not a package.
+---@param importer_rel_path string Importer path relative to its import root
 ---@param target_dotted string Absolute dotted path of the target
 ---@return string? relative
 function M.relative_dotted_path(importer_rel_path, target_dotted)
@@ -154,7 +174,7 @@ end
 ---@param imported_name string Text of one `name:` field entry
 ---@param old_dotted string Dotted name of the module being moved
 ---@param new_dotted string Dotted name of its destination
----@param importer_rel_path string Importer path relative to the project root
+---@param importer_rel_path string Importer path relative to its import root
 ---@return string? new_prefix Absolute dotted prefix after the move
 ---@return string? new_name
 function M.rename_from_import(
