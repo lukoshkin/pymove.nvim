@@ -1,5 +1,6 @@
 local api = vim.api
 local highlight = require "move.preview.highlight"
+local imports = require "move.imports"
 
 local M = {}
 
@@ -14,6 +15,11 @@ local M = {}
 local function render_import_lines(change)
   local old_line = change.full_line or ("from " .. change.old_import)
   local range = change.node_range
+
+  -- Nothing can be rewritten, so there is no "after" line to show
+  if change.unfixable then
+    return old_line, old_line
+  end
 
   if change.full_line and range and range[1] == range[3] then
     local from, to = range[2], range[4]
@@ -184,7 +190,17 @@ function M.build_preview_buffer(state)
       -- Show import diff based on status
       local old_line, new_line = render_import_lines(change)
 
-      if change.status == "accepted" then
+      if change.status == "unfixable" then
+        table.insert(
+          lines,
+          string.format(
+            "! %3d | %s  ⚠ %s",
+            change.line_num,
+            old_line,
+            change.reason or "needs a manual edit"
+          )
+        )
+      elseif change.status == "accepted" then
         table.insert(
           lines,
           string.format(
@@ -254,6 +270,22 @@ function M.build_preview_buffer(state)
     end
     highlight.apply_highlights(state.bufnr, state.namespace)
   end)
+end
+
+---Re-render every change under a different relative-import spelling
+---
+---Both spellings are computed once while collecting, so switching is a redraw
+---rather than another pass over the files.
+---@param state table PreviewState
+---@param strategy "absolute"|"preserve"
+function M.set_relative_strategy(state, strategy)
+  state.rel_strategy = strategy
+  for _, change in ipairs(state.changes) do
+    if change.new_import_absolute then
+      imports.select_strategy(change, strategy)
+    end
+  end
+  M.build_preview_buffer(state)
 end
 
 ---Find which change the cursor is currently on
@@ -333,7 +365,17 @@ function M.update_change_lines(state, change, old_status)
 
   local old_line, new_line = render_import_lines(change)
 
-  if change.status == "accepted" then
+  if change.status == "unfixable" then
+    table.insert(
+      new_lines,
+      string.format(
+        "! %3d | %s  ⚠ %s",
+        change.line_num,
+        old_line,
+        change.reason or "needs a manual edit"
+      )
+    )
+  elseif change.status == "accepted" then
     status_marker = " ✓"
     table.insert(
       new_lines,

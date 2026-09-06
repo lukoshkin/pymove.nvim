@@ -21,15 +21,18 @@
 ---@field namespace integer Extmark namespace
 ---@field truncated boolean? Whether file list was truncated
 ---@field total_files integer? Total number of files found
+---@field rel_strategy "absolute"|"preserve" Active relative-import spelling
 
 local api = vim.api
 local fn = vim.fn
 
 local apply = require "move.preview.apply"
 local collector = require "move.preview.collector"
+local config = require "pymove.config"
 local filesystem = require "move.filesystem"
 local keymaps = require "move.preview.keymaps"
 local refactor = require "move.refactor"
+local report = require "move.report"
 local state_mod = require "move.preview.state"
 local utils = require "move.utils"
 local window = require "move.preview.window"
@@ -84,12 +87,17 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
 
   -- File limit to prevent processing too many files at once
   local max_files = options.max_files or 200
+  local strategy = report.resolve_strategy(
+    options.relative_imports or config.options.move.relative_imports,
+    project_root,
+    new_name
+  )
 
   -- Collect files that might need updates
   local old_dotted = utils.path_to_dotted_name(old_name)
   local new_dotted = utils.path_to_dotted_name(new_name)
   local change = utils.estimate_change(old_dotted, new_dotted)
-  local pattern = utils.file_change_pattern(change)
+  local pattern = utils.file_change_pattern(change, old_dotted)
   local all_files =
     refactor.find_files_with_pattern(pattern, project_root, "*.py")
 
@@ -245,6 +253,7 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
         namespace = api.nvim_create_namespace "pymove-preview",
         truncated = truncated,
         total_files = #all_files,
+        rel_strategy = strategy,
       }
 
       -- Build buffer and setup keymaps
@@ -262,7 +271,8 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
         state_mod.jump_to_change(state, 1, true)
         window.update_winbar(state.winid)
       end)
-    end
+    end,
+    strategy
   )
 end
 

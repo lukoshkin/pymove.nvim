@@ -71,6 +71,7 @@ The preview window shows:
 **Actions:**
 - `<Space>` - Toggle status (pending → accepted → declined)
 - `<C-a>` / `<Alt-a>` - Accept all pending changes
+- `<C-r>` - Toggle how relative imports are rewritten (absolute ⇄ preserve)
 
 **Finalize:**
 - `q` - Apply accepted changes and close
@@ -163,6 +164,15 @@ Configure via the main pymove plugin:
     move = {
       -- Git integration (nil = auto-detect)
       use_git = nil,
+
+      -- How to rewrite an import that was written relatively:
+      --   "absolute" - always emit a full dotted path (default)
+      --   "preserve" - keep it relative when a valid relative form exists
+      -- Toggle per preview with <C-r>.
+      -- "absolute" falls back to "preserve" for a given move when the
+      -- destination is not reachable by a full dotted path (e.g. a src
+      -- layout, where src/ has no __init__.py); a warning explains why.
+      relative_imports = "absolute",
 
       -- Keymaps (false to disable)
       keymaps = {

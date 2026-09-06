@@ -2,6 +2,7 @@ local api = vim.api
 local Path = require "plenary.path"
 local filesystem = require "move.filesystem"
 local refactor = require "move.refactor"
+local report = require "move.report"
 
 local M = {}
 
@@ -172,6 +173,8 @@ function M.apply_accepted_changes(state)
 
     -- Files were rewritten on disk; refresh any buffers holding stale copies
     vim.cmd "silent! checktime"
+
+    report.publish_aliases(accepted_imports)
   end
 
   local msg_parts = {}

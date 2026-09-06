@@ -8,6 +8,7 @@ M.patterns = {
   git_mv = "git mv",
   old_import = "^%-",
   new_import = "^%+",
+  unfixable = "^!",
   context = "^ %d+ |",
   accepted = "✓",
   declined = "✗",
@@ -42,6 +43,12 @@ function M.apply_highlights(bufnr, namespace)
         row,
         0,
         { end_col = line_len, hl_group = "PyMoveHeader", strict = false },
+      })
+    elseif line_text:match(M.patterns.unfixable) then
+      table.insert(extmarks, {
+        row,
+        0,
+        { end_col = line_len, hl_group = "PyMoveUnfixable", strict = false },
       })
     elseif line_text:find(M.patterns.git_mv, 1, true) then
       table.insert(extmarks, {
@@ -122,7 +129,13 @@ function M.apply_highlights_range(bufnr, namespace, start_line, end_line)
       goto continue
     end
 
-    if line_text:find(M.patterns.git_mv, 1, true) or line_text:find("mv ", 1, true) then
+    if line_text:match(M.patterns.unfixable) then
+      pcall(api.nvim_buf_set_extmark, bufnr, namespace, row, 0, {
+        end_col = line_len,
+        hl_group = "PyMoveUnfixable",
+        strict = false,
+      })
+    elseif line_text:find(M.patterns.git_mv, 1, true) or line_text:find("mv ", 1, true) then
       pcall(api.nvim_buf_set_extmark, bufnr, namespace, row, 0, {
         end_col = line_len,
         hl_group = "PyMoveFileOperation",

@@ -73,6 +73,7 @@ A comprehensive Neovim plugin for Python development that provides intelligent c
     -- Move/rename configuration
     move = {
       use_git = nil,  -- Auto-detect
+      relative_imports = "absolute",  -- or "preserve"; toggle with <C-r>
       keymaps = {
         move_ui = "<Space>mr",
       },

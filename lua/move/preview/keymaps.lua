@@ -16,6 +16,14 @@ local function toggle_change_status(state)
   local cursor_pos = api.nvim_win_get_cursor(state.winid)
   local old_status = change.status
 
+  if change.status == "unfixable" then
+    vim.notify(
+      "This import needs a manual edit: " .. (change.reason or ""),
+      vim.log.levels.WARN
+    )
+    return
+  end
+
   if change.status == "pending" then
     change.status = "accepted"
   elseif change.status == "accepted" then
@@ -75,6 +83,24 @@ function M.setup_keymaps(state, apply_changes_fn)
     end
     pcall(api.nvim_win_set_cursor, state.winid, cursor_pos)
   end
+
+  vim.keymap.set("n", "<C-r>", function()
+    local strategy = state.rel_strategy == "preserve" and "absolute" or "preserve"
+    local cursor_pos = api.nvim_win_get_cursor(state.winid)
+    state_mod.set_relative_strategy(state, strategy)
+    vim.schedule(function()
+      if not api.nvim_win_is_valid(state.winid) then
+        return
+      end
+      cursor_pos[1] =
+        math.min(cursor_pos[1], api.nvim_buf_line_count(state.bufnr))
+      pcall(api.nvim_win_set_cursor, state.winid, cursor_pos)
+      vim.notify(
+        "Relative imports: " .. strategy,
+        vim.log.levels.INFO
+      )
+    end)
+  end, opts)
 
   vim.keymap.set("n", "<C-a>", accept_all_pending, opts)
   vim.keymap.set("n", "<A-a>", accept_all_pending, opts)

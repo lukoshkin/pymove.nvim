@@ -1,7 +1,9 @@
 local fn = vim.fn
 local Path = require "plenary.path"
 local filesystem = require "move.filesystem"
+local config = require "pymove.config"
 local refactor = require "move.refactor"
+local report = require "move.report"
 local utils = require "move.utils"
 
 local M = {}
@@ -57,8 +59,13 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
   local old_dotted = utils.path_to_dotted_name(old_name)
   local new_dotted = utils.path_to_dotted_name(new_name)
   local change = utils.estimate_change(old_dotted, new_dotted)
-  local pattern = utils.file_change_pattern(change)
+  local pattern = utils.file_change_pattern(change, old_dotted)
   local files = refactor.find_files_with_pattern(pattern, project_root, "*.py")
+  local strategy = report.resolve_strategy(
+    config.options.move.relative_imports,
+    project_root,
+    new_name
+  )
 
   if dry_run then
     log.info "DRY RUN - Would perform the following actions:"
@@ -96,7 +103,7 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
   end
 
   -- Step 2: Update imports in all affected files with progress bar
-  local updated_files = 0
+  local updated_files, unfixable, aliased = 0, {}, {}
 
   if #files > 0 then
     local window = require "move.preview.window"
@@ -107,15 +114,19 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
       -- Update progress
       window.update_loading_progress(loading_bufnr, i - 1, #files, file)
 
-      local num_changes = refactor.update_imports_direct(
+      local num_changes, skipped, aliases = refactor.update_imports_direct(
         file,
         old_dotted,
         new_dotted,
-        project_root
+        project_root,
+        nil,
+        strategy
       )
       if num_changes > 0 then
         updated_files = updated_files + 1
       end
+      vim.list_extend(unfixable, skipped)
+      vim.list_extend(aliased, aliases)
     end
 
     -- Final progress update
@@ -128,6 +139,26 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
         vim.api.nvim_win_close(loading_winid, true)
       end
     end, 500)
+  end
+
+  report.publish_aliases(aliased)
+
+  if #unfixable > 0 then
+    local details = {}
+    for _, item in ipairs(unfixable) do
+      table.insert(
+        details,
+        string.format("  %s:%d -- %s", item.file, item.line_num, item.reason)
+      )
+    end
+    vim.notify(
+      string.format(
+        "%d import(s) need a manual edit:\n%s",
+        #unfixable,
+        table.concat(details, "\n")
+      ),
+      vim.log.levels.WARN
+    )
   end
 
   local success_msg = string.format(

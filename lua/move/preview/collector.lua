@@ -1,11 +1,10 @@
 local api = vim.api
 local fn = vim.fn
 local Path = require "plenary.path"
-local utils = require "move.utils"
+local imports = require "move.imports"
 
 local M = {}
 
-local query_cache = {}
 local log = require("plenary.log").new {
   plugin = "pymove-preview-collector",
   use_console = true,
@@ -58,25 +57,20 @@ function M.check_swap_files(files)
   return swap_files
 end
 
-local function get_cached_query(lang, query_string)
-  local cache_key = lang .. ":" .. query_string
-  query_cache[cache_key] = query_cache[cache_key]
-    or vim.treesitter.query.parse(lang, query_string)
-  return query_cache[cache_key]
-end
-
 ---@param file string File path
 ---@param old_dotted string Old import path
 ---@param new_dotted string New import path
 ---@param project_root string Project root
 ---@param context_lines integer Number of context lines
+---@param strategy "absolute"|"preserve" How to spell rewritten relative imports
 ---@return table[] changes
 function M.process_file_changes(
   file,
   old_dotted,
   new_dotted,
   project_root,
-  context_lines
+  context_lines,
+  strategy
 )
   local changes = {}
 
@@ -106,70 +100,41 @@ function M.process_file_changes(
     return changes
   end
 
-  local trees = parser:parse()
-  if not trees or #trees == 0 then
-    log.warn("Failed to parse file: " .. file)
+  local rel_path = Path:new(file):make_relative(project_root)
+  local ok, matches =
+    pcall(imports.find_matches, bufnr, rel_path, old_dotted, new_dotted)
+  if not ok then
+    log.warn("Failed to scan imports in " .. file .. ": " .. tostring(matches))
     return changes
   end
+  local total_lines = api.nvim_buf_line_count(bufnr)
 
-  local tree = trees[1]
-  local root = tree:root()
-  local query_string = [[
-    (import_from_statement
-      module_name: (dotted_name) @module_name)
-    (import_statement
-      name: (dotted_name) @module_name)
-    (import_statement
-      name: (aliased_import
-        name: (dotted_name) @module_name))
-  ]]
-  local query_obj = get_cached_query("python", query_string)
+  for _, match in ipairs(matches) do
+    imports.select_strategy(match, strategy)
 
-  for id, node, metadata in query_obj:iter_captures(root, bufnr) do
-    if node then
-      local capture_name = query_obj.captures[id]
-      if capture_name == "module_name" then
-        local success, name = pcall(vim.treesitter.get_node_text, node, bufnr)
-        if not success then
-          goto continue_node
-        end
+    local start_row, end_row = match.node_range[1], match.node_range[3]
+    local ctx_start = math.max(0, start_row - context_lines)
+    local ctx_end = math.min(total_lines, end_row + context_lines + 1)
 
-        if name:find "^%." then
-          local rel_path = Path:new(file):make_relative(project_root)
-          name = utils.absolute_dotted_path(rel_path, name)
-        end
-
-        local new_import = utils.rename_dotted_prefix(name, old_dotted, new_dotted)
-        if new_import then
-          local start_row, start_col, end_row, end_col = node:range()
-
-          local total_lines = api.nvim_buf_line_count(bufnr)
-          local ctx_start = math.max(0, start_row - context_lines)
-          local ctx_end = math.min(total_lines, end_row + context_lines + 1)
-
-          local context_before = api.nvim_buf_get_lines(bufnr, ctx_start, start_row, false)
-          local context_after = api.nvim_buf_get_lines(bufnr, end_row + 1, ctx_end, false)
-
-          -- Get the full import line for display
-          local full_line = api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1] or ""
-
-          table.insert(changes, {
-            file = file,
-            line_num = start_row + 1,
-            old_import = name,
-            new_import = new_import,
-            full_line = full_line,
-            context_before = context_before,
-            context_after = context_after,
-            status = "pending",
-            buffer_line = 0,
-            node_range = { start_row, start_col, end_row, end_col },
-          })
-        end
-
-        ::continue_node::
-      end
-    end
+    table.insert(changes, {
+      file = file,
+      line_num = match.line_num,
+      old_import = match.old_import,
+      new_import = match.new_import,
+      new_import_absolute = match.new_import_absolute,
+      new_import_relative = match.new_import_relative,
+      unfixable = match.unfixable,
+      reason = match.reason,
+      aliased_name = match.aliased_name,
+      aliased_to = match.aliased_to,
+      full_line = api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
+        or "",
+      context_before = api.nvim_buf_get_lines(bufnr, ctx_start, start_row, false),
+      context_after = api.nvim_buf_get_lines(bufnr, end_row + 1, ctx_end, false),
+      status = match.unfixable and "unfixable" or "pending",
+      buffer_line = 0,
+      node_range = match.node_range,
+    })
   end
 
   return changes
@@ -181,13 +146,15 @@ end
 ---@param project_root string Project root
 ---@param progress_cb function? Progress callback (current, total, file)
 ---@param callback function Completion callback with changes
+---@param strategy "absolute"|"preserve" How to spell rewritten relative imports
 function M.collect_changes_async(
   old_dotted,
   new_dotted,
   files,
   project_root,
   progress_cb,
-  callback
+  callback,
+  strategy
 )
   local changes, current_idx = {}, 1
   local context_lines, batch_size = 3, 10
@@ -202,7 +169,8 @@ function M.collect_changes_async(
         old_dotted,
         new_dotted,
         project_root,
-        context_lines
+        context_lines,
+        strategy
       )
       for _, change in ipairs(file_changes) do
         table.insert(changes, change)

@@ -49,6 +49,36 @@ function M.find_project_root(start_path)
   return fn.getcwd()
 end
 
+---Find the first directory between the project root and a module that is not a
+---package
+---
+---Dotted names are derived from the path relative to the project root, but that
+---root is found by `.git` / `pyproject.toml`, which in a src layout sits one
+---level above the importable package. When any directory on the way down lacks
+---an `__init__.py`, the dotted name built from it is not importable -- `src` in
+---`src/mypkg/utils.py` being the common case.
+---@param project_root string
+---@param rel_path string Module path relative to the project root
+---@return string? offender Relative path of the first non-package directory
+function M.first_non_package_dir(project_root, rel_path)
+  local dir = rel_path:gsub("/+$", ""):match "^(.*)/[^/]*$"
+  if not dir or dir == "" or dir == "." then
+    return nil
+  end
+
+  local walked = {}
+  for part in dir:gmatch "[^/]+" do
+    table.insert(walked, part)
+    local as_path = table.concat(walked, "/")
+    local init = Path:new(project_root) / as_path / "__init__.py"
+    if not init:exists() then
+      return as_path
+    end
+  end
+
+  return nil
+end
+
 ---Check if a directory is a git repository
 ---@param project_root string
 ---@return boolean

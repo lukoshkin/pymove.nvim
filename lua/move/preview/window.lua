@@ -11,6 +11,7 @@ function M.setup_highlights()
   -- Import changes
   api.nvim_set_hl(0, "PyMoveOldImport", { fg = "#f38ba8", bg = "#3e2b35" }) -- Red background
   api.nvim_set_hl(0, "PyMoveNewImport", { fg = "#a6e3a1", bg = "#2b3328" }) -- Green background
+  api.nvim_set_hl(0, "PyMoveUnfixable", { fg = "#f9e2af", bg = "#3a3428" }) -- Yellow background
 
   -- Status indicators
   api.nvim_set_hl(0, "PyMoveAccepted", { fg = "#a6e3a1", bold = true }) -- Green
@@ -146,6 +147,7 @@ function M.show_help_window(parent_winid)
     "│ Actions:",
     "│   <Space>       Toggle status (pending → accepted → declined)",
     "│   <C-a> / <A-a> Accept all pending changes",
+    "│   <C-r>         Toggle relative imports (absolute ⇄ preserve)",
     "│",
     "│ Finalize:",
     "│   q             Apply accepted changes and close",

@@ -10,6 +10,7 @@
 
 ---@class MoveConfig
 ---@field use_git boolean|nil Auto-detect git by default
+---@field relative_imports "absolute"|"preserve" How to rewrite relative imports
 ---@field keymaps table<string, string>|false Keymaps for moving (false to disable)
 
 ---@class PyMoveConfig
@@ -62,6 +63,12 @@ M.defaults = {
     -- Git integration (nil = auto-detect)
     use_git = nil,
 
+    -- How to rewrite an import that was written relatively
+    --   "absolute" - always emit a full dotted path
+    --   "preserve" - keep it relative when a valid relative form exists
+    -- Toggle per preview with <C-r>
+    relative_imports = "absolute",
+
     -- Keymaps for move/rename functionality
     -- Set to false to disable all keymaps
     keymaps = {
@@ -70,8 +77,10 @@ M.defaults = {
   },
 }
 
+-- Populated with the defaults up front so consumers can read options whether or
+-- not `setup()` has run
 ---@type PyMoveConfig
-M.options = {}
+M.options = vim.deepcopy(M.defaults)
 
 ---Merge user options with defaults
 ---@param opts PyMoveConfig?
