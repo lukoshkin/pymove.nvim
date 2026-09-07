@@ -1,6 +1,44 @@
 local api = vim.api
+local fn = vim.fn
 
 local M = {}
+
+local FLAGS = { "--no-git", "--git", "-b", "--backup" }
+local KWARGS = { "import_root=", "project_root=" }
+
+---Read the trailing arguments of a move command
+---
+---`import_root=` is the one that costs nothing to get right and a lot to leave
+---open: without it each candidate root is scored by a project-wide scan, which
+---is the slow part of a move on a large or unignored tree. An empty value is
+---meaningful -- it names modules from the project root itself -- so the two
+---roots are returned separately from the options rather than defaulted here.
+---@param args string[]
+---@param first integer Index of the first option argument
+---@return table? options Nil when an argument was not recognised
+---@return string? project_root
+---@return string? error
+function M.parse_options(args, first)
+  local options, project_root = {}, nil
+  for i = first, #args do
+    local argument = args[i]
+    local key, value = argument:match "^([%w_]+)=(.*)$"
+    if argument == "--no-git" then
+      options.use_git = false
+    elseif argument == "--git" then
+      options.use_git = true
+    elseif argument == "-b" or argument == "--backup" then
+      options.backup = true
+    elseif key == "import_root" then
+      options.import_root = value
+    elseif key == "project_root" then
+      project_root = (fn.fnamemodify(fn.expand(value), ":p"):gsub("/$", ""))
+    else
+      return nil, nil, "Unrecognized argument: " .. argument
+    end
+  end
+  return options, project_root
+end
 
 ---Complete Python file paths relative to project root
 ---@param arglead string Current argument being completed
@@ -18,12 +56,12 @@ local function complete_python_paths(arglead, cmdline, curpos)
     arg_count = arg_count + 1
   end
 
-  -- For 3rd+ arguments, complete flags
+  -- For 3rd+ arguments, complete flags and the root overrides
   if arg_count >= 3 then
-    local flags = { "--no-git", "--git", "-b", "--backup" }
-    return vim.tbl_filter(function(flag)
-      return flag:find("^" .. vim.pesc(arglead))
-    end, flags)
+    local options = vim.list_extend(vim.list_slice(FLAGS), KWARGS)
+    return vim.tbl_filter(function(option)
+      return option:find("^" .. vim.pesc(arglead))
+    end, options)
   end
 
   -- For 1st and 2nd arguments, complete Python files
@@ -60,24 +98,21 @@ function M.setup(opts)
     local args = vim.split(cmd_opts.args, " ", { trimempty = true })
     if #args < 2 then
       vim.notify(
-        "Usage: :PyMove <old_path> <new_path> [--no-git|--git]",
+        "Usage: :PyMove <old_path> <new_path> [--no-git|--git] "
+          .. "[import_root=<dir>] [project_root=<dir>]",
         vim.log.levels.ERROR
       )
       return
     end
 
     local old_name, new_name = args[1], args[2]
-    local options = {}
-
-    for i = 3, #args do
-      if args[i] == "--no-git" then
-        options.use_git = false
-      elseif args[i] == "--git" then
-        options.use_git = true
-      end
+    local options, project_root, err = M.parse_options(args, 3)
+    if not options then
+      vim.notify(err, vim.log.levels.ERROR)
+      return
     end
 
-    move.move_module_or_package(old_name, new_name, nil, options)
+    move.move_module_or_package(old_name, new_name, project_root, options)
   end, {
     nargs = "*",
     desc = "Move Python module/package and update imports directly",
@@ -88,26 +123,21 @@ function M.setup(opts)
     local args = vim.split(cmd_opts.args, " ", { trimempty = true })
     if #args < 2 then
       vim.notify(
-        "Usage: :PyMovePreview <old_path> <new_path> [--no-git|--git] [-b|--backup]",
+        "Usage: :PyMovePreview <old_path> <new_path> [--no-git|--git] "
+          .. "[-b|--backup] [import_root=<dir>] [project_root=<dir>]",
         vim.log.levels.ERROR
       )
       return
     end
 
     local old_name, new_name = args[1], args[2]
-    local options = {}
-
-    for i = 3, #args do
-      if args[i] == "--no-git" then
-        options.use_git = false
-      elseif args[i] == "--git" then
-        options.use_git = true
-      elseif args[i] == "-b" or args[i] == "--backup" then
-        options.backup = true
-      end
+    local options, project_root, err = M.parse_options(args, 3)
+    if not options then
+      vim.notify(err, vim.log.levels.ERROR)
+      return
     end
 
-    move.preview_move(old_name, new_name, nil, options)
+    move.preview_move(old_name, new_name, project_root, options)
   end, {
     nargs = "*",
     desc = "Preview Python module/package move with interactive UI",

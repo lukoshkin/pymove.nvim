@@ -60,10 +60,27 @@ local root_cache = {}
 ---Every file under one is named from it, so no file needs its own lookup.
 local decided = { project_root = nil, roots = {} }
 
+---Import root pinned for the operation in progress, outranking the configured
+---one. Scoring a root costs a project-wide scan per candidate, so a caller that
+---already knows the answer can spend nothing at all.
+local pinned = nil
+
 ---Forget every import root worked out so far
-function M.reset_root_cache()
+---@param import_root string? Root to name modules from, "" for the project root
+function M.reset_root_cache(import_root)
   root_cache = {}
   decided = { project_root = nil, roots = {} }
+  pinned = import_root
+end
+
+---The import root someone settled for us, rather than one we have to score
+---@return string? root Nil when nothing settles it and the code has to be read
+local function settled_root()
+  local configured = pinned or config.options.move.import_root
+  if not configured then
+    return nil
+  end
+  return (configured:gsub("/+$", ""))
 end
 
 ---@param project_root string
@@ -271,9 +288,9 @@ end
 ---@return boolean inferred
 ---@return string[] rivals
 function M.resolve_import_root(project_root, rel_path, is_package)
-  local configured = config.options.move.import_root
+  local configured = settled_root()
   if configured then
-    return (configured:gsub("/+$", "")), false, {}
+    return configured, false, {}
   end
 
   local trimmed = rel_path:gsub("/+$", "")
@@ -303,9 +320,9 @@ end
 function M.import_relative_path(project_root, file)
   local rel_path = Path:new(file):make_relative(project_root)
 
-  local configured = config.options.move.import_root
+  local configured = settled_root()
   if configured then
-    return utils.strip_root(rel_path, (configured:gsub("/+$", "")))
+    return utils.strip_root(rel_path, configured)
   end
 
   if decided.project_root == project_root then

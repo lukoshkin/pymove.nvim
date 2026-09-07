@@ -30,7 +30,7 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
   local use_git = options.use_git
 
   project_root = project_root or filesystem.find_project_root()
-  filesystem.reset_root_cache()
+  filesystem.reset_root_cache(options.import_root)
 
   -- Auto-detect git if not specified
   if use_git == nil then

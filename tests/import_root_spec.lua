@@ -6,6 +6,8 @@ local fx = require "tests.fixtures"
 local config = require "pymove.config"
 local filesystem = require "move.filesystem"
 local refactor = require "move.refactor"
+local search = require "move.search"
+local commands = require "move.commands"
 local utils = require "move.utils"
 
 ---@return string import_root
@@ -122,6 +124,76 @@ return function()
   h.check("override drives naming", { names(dotted, "src/mypkg/utils.py", "src/mypkg/helpers.py").old_dotted }, { "mypkg.utils" })
   h.check("override drives importer paths", filesystem.import_relative_path(dotted, dotted .. "/src/mypkg/utils.py"), "mypkg/utils.py")
   config.options.move.import_root = nil
+
+  h.section "per-operation import root"
+  -- Scoring a root costs a project-wide scan per candidate; a caller that
+  -- already knows the answer must pay nothing, which is the whole point of
+  -- the override and the only part of it worth asserting
+  local scans, raw = 0, search.run
+  search.run = function(argv)
+    scans = scans + 1
+    return raw(argv)
+  end
+  filesystem.reset_root_cache "src"
+  local pinned = filesystem.resolve_move_names(
+    dotted,
+    "src/mypkg/utils.py",
+    "src/mypkg/helpers.py"
+  )
+  h.check("pinned root costs no scan", scans, 0)
+  h.check("pinned root names the module", pinned.old_dotted, "mypkg.utils")
+  h.check(
+    "pinned root names importers",
+    filesystem.import_relative_path(dotted, dotted .. "/src/mypkg/utils.py"),
+    "mypkg/utils.py"
+  )
+
+  -- `""` is a real answer, not an absent one: it names from the project root
+  filesystem.reset_root_cache ""
+  h.check(
+    "empty pin means the project root",
+    filesystem.resolve_move_names(
+      src,
+      "src/mypkg/utils.py",
+      "src/mypkg/helpers.py"
+    ).old_dotted,
+    "src.mypkg.utils"
+  )
+
+  -- The pin lasts one operation; the next reset goes back to reading the code
+  scans = 0
+  filesystem.reset_root_cache()
+  h.check(
+    "the pin does not outlive the operation",
+    filesystem.resolve_move_names(
+      src,
+      "src/mypkg/utils.py",
+      "src/mypkg/helpers.py"
+    ).old_dotted,
+    "mypkg.utils"
+  )
+  h.check("scoring resumes after the pin", scans > 0, true)
+  search.run = raw
+
+  h.section "command arguments"
+  for _, case in ipairs {
+    { "import_root=src", { import_root = "src" }, nil },
+    { "import_root=", { import_root = "" }, nil },
+    { "--no-git", { use_git = false }, nil },
+    { "-b", { backup = true }, nil },
+  } do
+    local options, _, err = commands.parse_options({ case[1] }, 1)
+    h.check("parses " .. case[1], { options, err }, { case[2], nil })
+  end
+  local bad, _, bad_error = commands.parse_options({ "import_rooot=src" }, 1)
+  h.check("a typo is refused, not ignored", bad, nil)
+  h.check(
+    "and says what it did not recognise",
+    bad_error,
+    "Unrecognized argument: import_rooot=src"
+  )
+  local _, where = commands.parse_options({ "project_root=" .. src }, 1)
+  h.check("project_root is passed through", where, src)
 
   h.section "discovery"
   filesystem.reset_root_cache()

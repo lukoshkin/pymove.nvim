@@ -22,9 +22,32 @@ A Neovim plugin for intelligently moving and renaming Python modules/packages wi
 
 ### Commands
 
-- `:PyMove <old_path> <new_path> [--git|--no-git]` - Move module/package directly
-- `:PyMovePreview <old_path> <new_path> [--git|--no-git]` - Preview changes before applying
+- `:PyMove <old_path> <new_path> [options]` - Move module/package directly
+- `:PyMovePreview <old_path> <new_path> [options]` - Preview changes before applying
 - `:PyMoveUI` - Interactive move with prompts and preview
+
+Options for both, in any order (an unrecognised one is an error, not a
+silently ignored argument):
+
+| Option | Effect |
+|---|---|
+| `--git` / `--no-git` | Force or forbid `git mv` instead of auto-detecting |
+| `-b`, `--backup` | Keep a `.orig` copy of each rewritten importer |
+| `import_root=<dir>` | Name modules from `<dir>` instead of working it out. `import_root=` (empty) means the project root |
+| `project_root=<dir>` | Search from `<dir>` instead of the nearest `.git` / `pyproject.toml` |
+
+**`import_root=` is the one that makes a slow move fast.** Left open, the
+import root is settled by scoring each candidate with a project-wide
+ripgrep scan, so a move costs one scan per candidate plus one for
+discovery -- three, typically. Pinning it costs none, leaving only the
+discovery scan. That is invisible on a tidy repo and very much not on a
+large one, a network filesystem, or a tree where ripgrep has no
+`.gitignore` to stop it walking a non-hidden `venv/`. Set it per command,
+or once via `move.import_root` (see Configuration).
+
+`project_root=` narrows what every scan walks rather than reducing their
+number. Reach for it when the detected root is higher than you want --
+a monorepo whose `.git` sits several levels above the package.
 
 ### Default Keymap
 

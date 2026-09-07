@@ -68,7 +68,9 @@ M.defaults = {
     -- root -- "src" for a src layout, "" for the project root itself.
     -- nil infers it from how the codebase already spells its imports, which
     -- is right whenever any absolute import of the module exists. Set this
-    -- when pymove says it could not tell.
+    -- when pymove says it could not tell -- or to make a move faster, since
+    -- inferring costs one project-wide scan per candidate root and this
+    -- costs none. `import_root=` on a command pins it for that move alone.
     import_root = nil,
 
     -- How to rewrite an import that was written relatively

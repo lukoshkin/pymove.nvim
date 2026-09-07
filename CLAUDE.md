@@ -121,7 +121,8 @@ Modify `lua/sort/sorter.lua`:
 To add new refactoring patterns:
 - Naming in `lua/move/filesystem.lua` (`resolve_move_names()`) -- the one place
   a path becomes a dotted name, and the only place the import root is decided.
-  `move.import_root` overrides the inference outright.
+  `move.import_root`, or `import_root=` on the command, overrides the
+  inference outright and skips its scans.
 - File discovery in `lua/move/utils.lua` (see `file_change_pattern()`) -- regex
   passed to ripgrep. Over-matching only costs a parse; under-matching means a
   silently stale import, so err wide.
@@ -222,6 +223,20 @@ it. A move therefore costs one scan per candidate root, not per file.
 settled roots at the start of each operation, and the settled roots are tagged
 with the project they came from so a second project in the same session cannot
 inherit them.
+
+**Scoring is the expensive part of a move.** Each candidate root costs one
+project-wide ripgrep scan, on top of the one discovery spends, so an ordinary
+move runs three. Nothing caps what those walk: outside a git repo, or with no
+`.gitignore` covering it, a non-hidden `venv/` is scanned like source. Both
+roots can therefore be pinned per command -- `import_root=<dir>` and
+`project_root=<dir>` on `:PyMove` / `:PyMovePreview`, parsed by
+`commands.parse_options()`. `import_root=` is the one that removes scans (three
+to one); `project_root=` only narrows what they walk. The pin reaches
+`filesystem` through `reset_root_cache(import_root)` and lasts exactly one
+operation, outranking `move.import_root`; `""` is a real value meaning the
+project root, so it is checked for nil rather than truthiness. An argument that
+matches nothing is an error -- a mistyped `import_root=` that silently reverted
+to scoring would be indistinguishable from the bug it exists to avoid.
 
 **When no import settles it**, the package chain is the only evidence left:
 `structural_import_root()` takes the parent of the topmost ancestor carrying an
