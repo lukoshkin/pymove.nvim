@@ -11,6 +11,7 @@
 ---@field aliased_to string? Module name it now aliases
 
 local utils = require "move.utils"
+local Path = require "plenary.path"
 
 local M = {}
 
@@ -61,16 +62,55 @@ local function range_of(node)
   return { start_row, start_col, end_row, end_col }
 end
 
----Whether the importer itself lives inside the subtree being moved
+---Where the importer itself ends up, when it lives inside the moved subtree
+---
+---Only the package components are ever read back out of this, so the renamed
+---dotted name is spelled straight into a path rather than rebuilt from the
+---original one.
 ---@param importer_rel_path string
 ---@param old_dotted string
----@return boolean
-local function importer_moves_too(importer_rel_path, old_dotted)
+---@param new_dotted string
+---@return string? destination Nil when the importer stays where it is
+local function importer_destination(importer_rel_path, old_dotted, new_dotted)
   local ok, dotted = pcall(utils.path_to_dotted_name, importer_rel_path)
   if not ok then
+    return nil
+  end
+  local moved = utils.rename_dotted_prefix(dotted, old_dotted, new_dotted)
+  if not moved then
+    return nil
+  end
+  return (moved:gsub("%.", "/")) .. ".py"
+end
+
+---Whether a relative import in a moving file still reaches the same module
+---
+---A relative import travels with its subtree only while both ends of it do.
+---`from ..old.util import VALUE` inside `pkg/old` climbs out to `pkg` and names
+---the package it just left, so renaming `pkg/old` to `pkg/new` strands it even
+---though the module it asks for moved along with the importer.
+---@param importer_rel_path string
+---@param destination_rel_path string Importer's path after the move
+---@param module_text string Text of the `module_name:` field
+---@param old_dotted string
+---@param new_dotted string
+---@return boolean
+local function relative_import_survives(
+  importer_rel_path,
+  destination_rel_path,
+  module_text,
+  old_dotted,
+  new_dotted
+)
+  local resolved, before =
+    pcall(utils.absolute_dotted_path, importer_rel_path, module_text)
+  local reresolved, after =
+    pcall(utils.absolute_dotted_path, destination_rel_path, module_text)
+  if not resolved or not reresolved then
     return false
   end
-  return utils.rename_dotted_prefix(dotted, old_dotted, old_dotted) ~= nil
+  local wanted = utils.rename_dotted_prefix(before, old_dotted, new_dotted)
+  return after == (wanted or before)
 end
 
 ---Collect `import a.b` / `import a.b as c` renames
@@ -79,8 +119,14 @@ end
 ---@param old_dotted string
 ---@param new_dotted string
 ---@param matches ImportMatch[]
-local function collect_plain_import(stmt, bufnr, old_dotted, new_dotted, matches)
-  for _, entry in ipairs(stmt:field("name")) do
+local function collect_plain_import(
+  stmt,
+  bufnr,
+  old_dotted,
+  new_dotted,
+  matches
+)
+  for _, entry in ipairs(stmt:field "name") do
     local name_node = unwrap_alias(entry, bufnr)
     if name_node and name_node:type() == "dotted_name" then
       local name = text(name_node, bufnr)
@@ -107,14 +153,15 @@ end
 ---@return boolean matched
 local function collect_prefix_rename(ctx, matches)
   local abs_prefix = ctx.abs_prefix
-  local renamed = utils.rename_dotted_prefix(abs_prefix, ctx.old_dotted, ctx.new_dotted)
+  local renamed =
+    utils.rename_dotted_prefix(abs_prefix, ctx.old_dotted, ctx.new_dotted)
   if not renamed then
     return false
   end
 
   local relative = nil
   if ctx.is_relative then
-    relative = utils.relative_dotted_path(ctx.importer_rel_path, renamed)
+    relative = utils.relative_dotted_path(ctx.destination_rel_path, renamed)
   end
 
   local range = range_of(ctx.module_node)
@@ -177,7 +224,9 @@ local function collect_name_rename(ctx, matches)
         end
         if new_prefix == "" then
           mark_unfixable(
-            "`" .. new_name .. "` now lives at the import root; use `import "
+            "`"
+              .. new_name
+              .. "` now lives at the import root; use `import "
               .. new_name
               .. "` instead"
           )
@@ -202,7 +251,7 @@ local function collect_name_rename(ctx, matches)
 
         local relative = nil
         local rel_prefix =
-          utils.relative_dotted_path(ctx.importer_rel_path, new_prefix)
+          utils.relative_dotted_path(ctx.destination_rel_path, new_prefix)
         if rel_prefix then
           relative = string.format(
             "from %s import %s%s",
@@ -250,9 +299,21 @@ local function collect_from_import(
   local module_text = text(module_node, bufnr)
   local is_relative = module_node:type() == "relative_import"
 
-  -- A relative import inside the moved subtree keeps pointing at the right
-  -- module after the move, because its target travelled with it
-  if is_relative and importer_moves_too(importer_rel_path, old_dotted) then
+  -- An importer inside the moved subtree carries its relative imports along,
+  -- but only those whose target travels with it
+  local destination =
+    importer_destination(importer_rel_path, old_dotted, new_dotted)
+  if
+    is_relative
+    and destination
+    and relative_import_survives(
+      importer_rel_path,
+      destination,
+      module_text,
+      old_dotted,
+      new_dotted
+    )
+  then
     return
   end
 
@@ -274,6 +335,9 @@ local function collect_from_import(
     abs_prefix = abs_prefix,
     is_relative = is_relative,
     importer_rel_path = importer_rel_path,
+    -- The statement is resolved from where the importer is now, but a new
+    -- relative spelling has to be written for where it will be
+    destination_rel_path = destination or importer_rel_path,
     old_dotted = old_dotted,
     new_dotted = new_dotted,
   }
@@ -297,15 +361,18 @@ end
 function M.find_matches(bufnr, importer_rel_path, old_dotted, new_dotted)
   local parser = vim.treesitter.get_parser(bufnr, "python")
   if not parser then
-    return {}
+    error "Python treesitter parser is required"
   end
 
   local trees = parser:parse()
   if not trees or #trees == 0 then
-    return {}
+    error "Python treesitter parser returned no syntax tree"
   end
 
   local root = trees[1]:root()
+  if root:has_error() then
+    error "Python syntax tree contains errors"
+  end
   local query = get_query()
   local matches = {}
 
@@ -328,6 +395,66 @@ function M.find_matches(bufnr, importer_rel_path, old_dotted, new_dotted)
   return matches
 end
 
+---Cross-package relative imports need source and destination contexts. Until
+---that transformation is supported, refuse rather than changing their meaning.
+---@param source string Absolute module or package path
+---@param old_dotted string
+---@param new_dotted string
+---@return boolean valid
+---@return string? error
+function M.validate_relocation(source, old_dotted, new_dotted)
+  if
+    utils.split_dotted_tail(old_dotted) == utils.split_dotted_tail(new_dotted)
+  then
+    return true
+  end
+  -- Walked rather than globbed: `globpath()` reads its first argument as a
+  -- comma-separated list of directories, so a comma anywhere in the path split
+  -- the source into two that do not exist and the guard silently saw no files
+  local files = Path:new(source):is_dir()
+      and vim.fs.find(function(name)
+        return name:sub(-3) == ".py"
+      end, { path = source, type = "file", limit = math.huge })
+    or { source }
+  for _, file in ipairs(files) do
+    local fd, read_error = io.open(file, "r")
+    if not fd then
+      return false, file .. ": " .. read_error
+    end
+    local content, content_error = fd:read "*a"
+    fd:close()
+    if not content then
+      return false, file .. ": " .. content_error
+    end
+    local ok, parser =
+      pcall(vim.treesitter.get_string_parser, content, "python")
+    if not ok or not parser then
+      return false,
+        "Cannot check relative imports in "
+          .. file
+          .. "; Python treesitter parser is required"
+    end
+    local trees = parser:parse()
+    if not trees or not trees[1] or trees[1]:root():has_error() then
+      return false, "Cannot parse " .. file
+    end
+    for id, node in get_query():iter_captures(trees[1]:root(), content) do
+      if get_query().captures[id] == "from_stmt" then
+        local module_node = node:field("module_name")[1]
+        if module_node and module_node:type() == "relative_import" then
+          return false,
+            string.format(
+              "%s:%d: cross-package moves containing relative imports are not supported; convert these imports to absolute form first",
+              file,
+              node:start() + 1
+            )
+        end
+      end
+    end
+  end
+  return true
+end
+
 ---Point `new_import` at the spelling the strategy asks for
 ---
 ---Imports written absolutely carry no relative candidate, so they render the
@@ -337,7 +464,7 @@ end
 function M.select_strategy(match, strategy)
   if strategy ~= "absolute" and strategy ~= "preserve" then
     error(
-      "move.relative_imports must be \"absolute\" or \"preserve\", got "
+      'move.relative_imports must be "absolute" or "preserve", got '
         .. vim.inspect(strategy)
     )
   end

@@ -5,7 +5,7 @@ A Neovim plugin for intelligently moving and renaming Python modules/packages wi
 ## Features
 
 - **Smart refactoring**: Move or rename Python files/packages
-- **Automatic import updates**: Updates all import statements across the project
+- **Automatic import updates**: Rewrites supported import forms across the project
 - **Git integration**: Auto-detects git and uses `git mv` when available
 - **Interactive preview**: Visual preview with per-file change approval
 - **Dependency tracking**: Finds all files affected by the move
@@ -139,10 +139,32 @@ move.move_module_or_package(
 2. **Discovery**: Finds all Python files that import the module
 3. **Analysis**: Calculates import path transformations
 4. **Preview**: Shows interactive diff of all changes
-5. **Execution**:
+5. **Preparation**: Checks proposed spans and file access before moving or rewriting
+6. **Execution**:
    - Moves file/directory (using `git mv` if in git repo)
-   - Updates imports in all affected files
-6. **Verification**: Reports number of files updated
+   - Stages and replaces each affected importer's contents
+7. **Result**: Reports updates or a failure
+
+Both command paths collect imports before moving the source. Preview also
+allows a move with no matching importers. Discovery and parser failures stop
+the operation; no matches is a valid result. Stale accepted preview spans stop
+the entire accepted set before modification.
+
+Cross-package moves containing relative imports anywhere in the moved code
+are currently refused. Convert those imports to absolute form first. This
+includes inward relative imports that could be safe but have not been covered
+by the cross-package transformation. Same-parent renames remain supported.
+
+Each importer replacement preserves permissions and avoids truncating the
+original file on a failed write. This is not a transaction across the project:
+an I/O failure after the source moves can leave other files already updated.
+The command reports failure; inspect `:messages` and your diff before recovery.
+For preview, declining the move or individual imports intentionally applies
+only your accepted subset and can require manual follow-up.
+
+Mixed import spellings, vendored trees influencing inference, and
+`from pkg import module` when moving that module remain limitations. The
+bounded acceptance cases and test command are in [tests/README.md](../../tests/README.md).
 
 ## Git Integration
 
@@ -169,9 +191,8 @@ Configure via the main pymove plugin:
       --   "absolute" - always emit a full dotted path (default)
       --   "preserve" - keep it relative when a valid relative form exists
       -- Toggle per preview with <C-r>.
-      -- "absolute" falls back to "preserve" for a given move when the
-      -- destination is not reachable by a full dotted path (e.g. a src
-      -- layout, where src/ has no __init__.py); a warning explains why.
+      -- "absolute" falls back to "preserve" when the resolver reports an
+      -- inferred import root; a warning explains the assumption.
       relative_imports = "absolute",
 
       -- Keymaps (false to disable)

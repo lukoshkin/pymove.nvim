@@ -2,6 +2,7 @@ local fn = vim.fn
 local Path = require "plenary.path"
 local config = require "pymove.config"
 local utils = require "move.utils"
+local search = require "move.search"
 
 local M = {}
 
@@ -15,7 +16,7 @@ end
 
 ---Find the project root by searching for common markers
 ---@param start_path string? Starting path (defaults to current buffer's directory)
----@return string? Project root path
+---@return string Project root path
 function M.find_project_root(start_path)
   start_path = start_path or fn.expand "%:p:h"
   local current = Path:new(start_path)
@@ -182,13 +183,21 @@ local function count_spellings(project_root, dotted_names)
     end
   end
 
-  local cmd = string.format(
-    "rg --count-matches --no-messages -g '*.py' -e %s %s",
-    fn.shellescape(table.concat(alts, "|")),
-    fn.shellescape(project_root)
-  )
+  local output, err = search.run {
+    "rg",
+    "--count-matches",
+    "-g",
+    "*.py",
+    "-e",
+    table.concat(alts, "|"),
+    "--",
+    project_root,
+  }
+  if not output then
+    error(err)
+  end
   local total = 0
-  for _, line in ipairs(fn.systemlist(cmd)) do
+  for _, line in ipairs(output) do
     total = total + (tonumber(line:match ":(%d+)$") or 0)
   end
   return total
@@ -231,7 +240,8 @@ function M.find_import_root(project_root, rel_path, is_package)
       end
     end
 
-    local count = #spellings > 0 and count_spellings(project_root, spellings) or 0
+    local count = #spellings > 0 and count_spellings(project_root, spellings)
+      or 0
     scored[candidate] = count
     -- Ties go to the shallower root, which is the one already in `best`
     if count > best_count then
@@ -314,7 +324,10 @@ function M.import_relative_path(project_root, file)
   end
 
   local rel_dir = rel_path:match "^(.*)/[^/]*$" or ""
-  return utils.strip_root(rel_path, structural_import_root(project_root, rel_dir))
+  return utils.strip_root(
+    rel_path,
+    structural_import_root(project_root, rel_dir)
+  )
 end
 
 ---@class MoveNames
@@ -368,8 +381,12 @@ function M.resolve_move_names(project_root, old_name, new_name)
   decided = { project_root = project_root, roots = { old_root, new_root } }
 
   return {
-    old_dotted = utils.path_to_dotted_name(utils.strip_root(old_name, old_root)),
-    new_dotted = utils.path_to_dotted_name(utils.strip_root(new_name, new_root)),
+    old_dotted = utils.path_to_dotted_name(
+      utils.strip_root(old_name, old_root)
+    ),
+    new_dotted = utils.path_to_dotted_name(
+      utils.strip_root(new_name, new_root)
+    ),
     inferred = inferred,
     rivals = rivals,
   }
@@ -398,8 +415,7 @@ function M.validate_move_possible(old_path, new_path)
   end
 
   if new_full_path:exists() then
-    return false,
-      "Destination path already exists: " .. tostring(new_full_path)
+    return false, "Destination path already exists: " .. tostring(new_full_path)
   end
 
   if old_full_path:is_file() and not old_path:match "%.py$" then
@@ -471,15 +487,16 @@ function M.move_file_or_directory(old_path, new_path, use_git)
   end
 
   -- Fallback to filesystem move
-  local success, err = pcall(function()
-    old_full_path:rename { new_name = tostring(new_full_path) }
-  end)
-
-  if success then
+  if new_full_path:exists() then
+    return false, "Destination path already exists: " .. tostring(new_full_path)
+  end
+  local renamed, rename_error =
+    vim.uv.fs_rename(tostring(old_full_path), tostring(new_full_path))
+  if renamed then
     log.info("Successfully moved: " .. old_path .. " -> " .. new_path)
     return true, nil
   else
-    return false, "Failed to move file/directory: " .. tostring(err)
+    return false, "Failed to move file/directory: " .. tostring(rename_error)
   end
 end
 

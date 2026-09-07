@@ -2,6 +2,7 @@ local api = vim.api
 local fn = vim.fn
 local filesystem = require "move.filesystem"
 local imports = require "move.imports"
+local search = require "move.search"
 
 local M = {}
 
@@ -17,45 +18,31 @@ end
 ---@param pattern string Regex pattern to search for
 ---@param directory string Directory to search in
 ---@param extension string File extension pattern (e.g., "*.py")
----@return string[] List of file paths
+---@return string[]? List of file paths, nil on search failure
+---@return string? error
 function M.find_files_with_pattern(pattern, directory, extension)
-  local results = {}
-  local log = get_log()
-  local rg_cmd = string.format(
-    "rg --files-with-matches --no-messages -g '%s' -e '%s' %s",
+  if fn.executable "rg" == 1 then
+    return search.run {
+      "rg",
+      "--files-with-matches",
+      "-g",
+      extension,
+      "-e",
+      pattern,
+      "--",
+      directory,
+    }
+  end
+  return search.run {
+    "grep",
+    "-rlE",
+    "--include",
     extension,
+    "-e",
     pattern,
-    directory
-  )
-  local grep_cmd = string.format(
-    "grep -rlE --include '%s' '%s' %s",
-    extension,
-    pattern,
-    directory
-  )
-
-  local function run_command(cmd)
-    local output = fn.systemlist(cmd)
-    if vim.v.shell_error ~= 0 then
-      return nil, output
-    end
-    return output
-  end
-
-  local output, err = run_command(rg_cmd)
-  if not output then
-    output, err = run_command(grep_cmd)
-    if not output then
-      log.debug("Error running command: ", err)
-      return results
-    end
-  end
-
-  for _, file in ipairs(output) do
-    table.insert(results, file)
-  end
-
-  return results
+    "--",
+    directory,
+  }
 end
 
 ---Escape a string so gsub treats it as a literal replacement
@@ -63,6 +50,45 @@ end
 ---@return string
 local function escape_replacement(text)
   return (text:gsub("%%", "%%%%"))
+end
+
+---Stage bytes beside the destination so a failed write cannot truncate it.
+---@param file string
+---@param content string
+---@return boolean success
+---@return string? error
+local function write_replacement(file, content)
+  local target, resolve_error = vim.uv.fs_realpath(file)
+  if not target then
+    return false, resolve_error
+  end
+  local temporary = target .. ".pymove-" .. fn.fnamemodify(fn.tempname(), ":t")
+  local fd, open_error = io.open(temporary, "w")
+  if not fd then
+    return false, open_error
+  end
+  local written, write_error = fd:write(content)
+  local closed, close_error = fd:close()
+  local err = not written and write_error or not closed and close_error
+  if not err and fn.setfperm(temporary, fn.getfperm(target)) == 0 then
+    err = "cannot preserve file permissions"
+  end
+  if not err then
+    local renamed, rename_error = vim.uv.fs_rename(temporary, target)
+    if renamed then
+      return true
+    end
+    err = rename_error
+  end
+  local removed, removal_error = os.remove(temporary)
+  if not removed then
+    err = err
+      .. "; could not remove staging file "
+      .. temporary
+      .. ": "
+      .. removal_error
+  end
+  return false, err
 end
 
 ---Rewrite a file on disk, replacing import names on the given lines
@@ -73,15 +99,20 @@ end
 ---@param file string File path (absolute)
 ---@param edits table[] List of {line_num, old_text, new_text, start_col?, end_col?}
 ---@param backup boolean? Whether to keep a `.orig` copy of the file
+---@param validate_only boolean? Check edits and write access without writing
 ---@return integer applied Number of edits written
 ---@return string? err Description of the edits that could not be applied
-local function rewrite_import_lines(file, edits, backup)
-  local fd = io.open(file, "r")
+local function rewrite_import_lines(file, edits, backup, validate_only)
+  local fd = io.open(file, validate_only and "r+" or "r")
   if not fd then
-    return 0, "cannot read file"
+    return 0,
+      "cannot open file for " .. (validate_only and "rewriting" or "reading")
   end
-  local content = fd:read "*a"
+  local content, read_error = fd:read "*a"
   fd:close()
+  if not content then
+    return 0, "cannot read file: " .. read_error
+  end
 
   local lines = vim.split(content, "\n", { plain = true })
 
@@ -127,32 +158,37 @@ local function rewrite_import_lines(file, edits, backup)
   end
 
   local err = #unmatched > 0
-      and (
-        "file changed since preview, no match on "
-        .. table.concat(unmatched, ", ")
-      )
+      and ("file changed since preview, no match on " .. table.concat(
+        unmatched,
+        ", "
+      ))
     or nil
 
-  if applied == 0 then
+  if err then
     return 0, err
+  end
+  if validate_only or applied == 0 then
+    return applied
   end
 
   if backup then
     local backup_fd = io.open(file .. ".orig", "w")
     if backup_fd then
-      backup_fd:write(content)
-      backup_fd:close()
+      local written, write_error = backup_fd:write(content)
+      local closed, close_error = backup_fd:close()
+      if not written or not closed then
+        return 0, "cannot write backup: " .. (write_error or close_error)
+      end
     else
       return 0, "cannot write backup file"
     end
   end
 
-  local out = io.open(file, "w")
-  if not out then
-    return 0, "cannot write file"
+  local written, write_error =
+    write_replacement(file, table.concat(lines, "\n"))
+  if not written then
+    return 0, "cannot write file: " .. write_error
   end
-  out:write(table.concat(lines, "\n"))
-  out:close()
 
   return applied, err
 end
@@ -178,8 +214,16 @@ end
 ---@param specific_changes table[] List of changes with file, line_num, old_import, new_import
 ---@param project_root string? Unused, kept for call-site compatibility
 ---@param backup boolean? Whether to create backup files (default: false)
+---@param validate_only boolean? Check spans and write access without writing
 ---@return integer applied Number of imports rewritten
-function M.update_specific_imports_direct(file, specific_changes, project_root, backup)
+---@return string? error
+function M.update_specific_imports_direct(
+  file,
+  specific_changes,
+  project_root,
+  backup,
+  validate_only
+)
   local log = get_log()
 
   if #specific_changes == 0 then
@@ -191,12 +235,36 @@ function M.update_specific_imports_direct(file, specific_changes, project_root, 
     table.insert(edits, change_to_edit(change))
   end
 
-  local applied, err = rewrite_import_lines(file, edits, backup)
+  local applied, err = rewrite_import_lines(file, edits, backup, validate_only)
   if err then
     log.error(string.format("Failed to update imports in %s: %s", file, err))
   end
 
-  return applied
+  return applied, err
+end
+
+---Check every proposed edit before moving the source or writing any importer.
+---@param changes table[]
+---@return boolean valid
+---@return string? error
+function M.validate_changes(changes)
+  local by_file = {}
+  for _, change in ipairs(changes) do
+    if change.unfixable then
+      return false,
+        string.format("%s:%d: %s", change.file, change.line_num, change.reason)
+    end
+    by_file[change.file] = by_file[change.file] or {}
+    table.insert(by_file[change.file], change)
+  end
+  for file, edits in pairs(by_file) do
+    local count, err =
+      M.update_specific_imports_direct(file, edits, nil, false, true)
+    if count ~= #edits then
+      return false, file .. ": " .. err
+    end
+  end
+  return true
 end
 
 ---Update imports in a file from old to new dotted name
@@ -235,7 +303,7 @@ function M.update_imports_direct(
     log.warn("Failed to load buffer for file: " .. file)
     if api.nvim_buf_is_valid(bufnr) and api.nvim_buf_is_loaded(bufnr) then
       pcall(vim.api.nvim_buf_call, bufnr, function()
-        vim.cmd("silent! bunload!")
+        vim.cmd "silent! bunload!"
       end)
     end
     return 0, {}, {}
@@ -253,7 +321,7 @@ function M.update_imports_direct(
   -- Clean up buffer (unload only, don't delete)
   if api.nvim_buf_is_valid(bufnr) and api.nvim_buf_is_loaded(bufnr) then
     pcall(vim.api.nvim_buf_call, bufnr, function()
-      vim.cmd("silent! bunload!")
+      vim.cmd "silent! bunload!"
     end)
   end
 

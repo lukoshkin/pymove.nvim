@@ -5,11 +5,14 @@ local config = require "pymove.config"
 local refactor = require "move.refactor"
 local report = require "move.report"
 local utils = require "move.utils"
+local imports = require "move.imports"
+local collector = require "move.preview.collector"
+local window = require "move.preview.window"
 
 local M = {}
 
 -- Global logger for the module
-log = require("plenary.log").new {
+local log = require("plenary.log").new {
   plugin = "pymove-refactor",
   use_console = true,
 }
@@ -58,16 +61,54 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
 
   -- Calculate import path changes. Dotted names come from each side's import
   -- root, not the filesystem root the paths are given against
-  local names = filesystem.resolve_move_names(project_root, old_name, new_name)
+  local resolved, names =
+    pcall(filesystem.resolve_move_names, project_root, old_name, new_name)
+  if not resolved then
+    return false, tostring(names)
+  end
   local old_dotted, new_dotted = names.old_dotted, names.new_dotted
+  local supported, reason =
+    imports.validate_relocation(tostring(old_path), old_dotted, new_dotted)
+  if not supported then
+    ---@cast reason string
+    return false, reason
+  end
   local change = utils.estimate_change(old_dotted, new_dotted)
   local pattern = utils.file_change_pattern(change, old_dotted)
-  local files = refactor.find_files_with_pattern(pattern, project_root, "*.py")
+  local files, search_error =
+    refactor.find_files_with_pattern(pattern, project_root, "*.py")
+  if not files then
+    ---@cast search_error string
+    return false, search_error
+  end
   report.warn_rival_spellings(names.rivals, new_dotted)
   local strategy = report.resolve_strategy(
-    config.options.move.relative_imports,
+    options.relative_imports or config.options.move.relative_imports,
     names.inferred
   )
+
+  local changes, by_file = {}, {}
+  for _, file in ipairs(files) do
+    local file_changes, scan_error = collector.process_file_changes(
+      file,
+      old_dotted,
+      new_dotted,
+      project_root,
+      0,
+      strategy
+    )
+    if not file_changes then
+      ---@cast scan_error string
+      return false, scan_error
+    end
+    by_file[file] = file_changes
+    vim.list_extend(changes, file_changes)
+  end
+  local ready, preparation_error = refactor.validate_changes(changes)
+  if not ready then
+    ---@cast preparation_error string
+    return false, preparation_error
+  end
 
   if dry_run then
     log.info "DRY RUN - Would perform the following actions:"
@@ -102,13 +143,16 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
     elseif file:sub(1, #old_path_str + 1) == old_path_str .. "/" then
       files[i] = new_path_str .. file:sub(#old_path_str + 1)
     end
+    if files[i] ~= file then
+      by_file[files[i]] = by_file[file]
+      by_file[file] = nil
+    end
   end
 
   -- Step 2: Update imports in all affected files with progress bar
-  local updated_files, unfixable, aliased = 0, {}, {}
+  local updated_files, failures, aliased = 0, {}, {}
 
   if #files > 0 then
-    local window = require "move.preview.window"
     local title = string.format(" Updating Imports (%d files) ", #files)
     local loading_bufnr, loading_winid = window.create_loading_window(title)
 
@@ -116,19 +160,24 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
       -- Update progress
       window.update_loading_progress(loading_bufnr, i - 1, #files, file)
 
-      local num_changes, skipped, aliases = refactor.update_imports_direct(
+      local file_changes = by_file[file]
+      local num_changes, write_error = refactor.update_specific_imports_direct(
         file,
-        old_dotted,
-        new_dotted,
+        file_changes,
         project_root,
-        nil,
-        strategy
+        options.backup
       )
       if num_changes > 0 then
         updated_files = updated_files + 1
       end
-      vim.list_extend(unfixable, skipped)
-      vim.list_extend(aliased, aliases)
+      if num_changes ~= #file_changes then
+        table.insert(failures, file .. ": " .. write_error)
+      else
+        for _, item in ipairs(file_changes) do
+          item.file = file
+          table.insert(aliased, item)
+        end
+      end
     end
 
     -- Final progress update
@@ -145,22 +194,12 @@ function M.move_module_or_package(old_name, new_name, project_root, options)
 
   report.publish_aliases(aliased)
 
-  if #unfixable > 0 then
-    local details = {}
-    for _, item in ipairs(unfixable) do
-      table.insert(
-        details,
-        string.format("  %s:%d -- %s", item.file, item.line_num, item.reason)
-      )
-    end
-    vim.notify(
-      string.format(
-        "%d import(s) need a manual edit:\n%s",
-        #unfixable,
-        table.concat(details, "\n")
-      ),
-      vim.log.levels.WARN
-    )
+  vim.cmd "silent! checktime"
+  if #failures > 0 then
+    local message = "Source moved, but import updates failed:\n"
+      .. table.concat(failures, "\n")
+    vim.notify(message, vim.log.levels.ERROR)
+    return false, message
   end
 
   local success_msg = string.format(

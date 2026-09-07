@@ -156,6 +156,32 @@ function M.fresh_module()
   }
 end
 
+---A package whose modules reach a sibling by climbing out and naming it
+---
+---`from ..old.util import VALUE` reaches the same module as `from .util`, but
+---it spells the package it climbed out of. Renaming `pkg/old` moves that target
+---along with the importer, so a rule that asks only whether the importer moves
+---leaves the statement pointing at a `pkg.old` that no longer exists. The other
+---two imports are the cases that must stay untouched: one whose target travels
+---with the subtree, one that reaches outside it and the rename never touches.
+function M.self_reference()
+  return {
+    ["pyproject.toml"] = "",
+    ["pkg/__init__.py"] = INIT,
+    ["pkg/sibling.py"] = "OTHER = 5",
+    ["pkg/old/__init__.py"] = INIT,
+    ["pkg/old/util.py"] = "VALUE = 7",
+    ["pkg/old/mod.py"] = table.concat({
+      "from ..old.util import VALUE",
+      "from .util import VALUE as DIRECT",
+      "from ..sibling import OTHER",
+      "",
+      "def total(): return VALUE + DIRECT + OTHER",
+    }, "\n"),
+    ["consumer.py"] = "from pkg.old.mod import total",
+  }
+end
+
 ---Many importer directories outside the source root, for the scan-count guard
 ---@param importer_dirs integer
 ---@param padding integer

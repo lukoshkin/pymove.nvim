@@ -8,10 +8,33 @@ local M = {}
 
 local passed, failed, failures = 0, 0, {}
 
+---@param label string
+---@param run function
+function M.case(label, run)
+  print("\n-- " .. label)
+  local ok, err = xpcall(run, debug.traceback)
+  if not ok then
+    M.check(label, err, "completed without an error")
+  end
+end
+
 ---Put plenary on the runtimepath, wherever this machine keeps it
 ---@return boolean ok
 function M.bootstrap()
-  vim.opt.runtimepath:append(vim.fn.fnamemodify(debug.getinfo(1).source:sub(2), ":h:h"))
+  for _, executable in ipairs { "python3", "rg" } do
+    if vim.fn.executable(executable) == 0 then
+      print(executable .. " is required; no checks were run")
+      return false
+    end
+  end
+  local parser_ok, parser_error = pcall(vim.treesitter.language.add, "python")
+  if not parser_ok then
+    print("Python treesitter parser is required: " .. tostring(parser_error))
+    return false
+  end
+  vim.opt.runtimepath:append(
+    vim.fn.fnamemodify(debug.getinfo(1).source:sub(2), ":h:h")
+  )
 
   if pcall(require, "plenary.path") then
     return true
@@ -118,7 +141,7 @@ end
 ---@return string output
 function M.imports_cleanly(project_root, modules, path_entry)
   if vim.fn.executable "python3" == 0 then
-    return true, "python3 unavailable, skipped"
+    return false, "python3 is required"
   end
   local cmd = ("cd %s && PYTHONPATH=%s python3 -c %s 2>&1"):format(
     vim.fn.shellescape(project_root),
@@ -128,6 +151,9 @@ function M.imports_cleanly(project_root, modules, path_entry)
     vim.fn.shellescape("import " .. table.concat(modules, ", "))
   )
   local out = vim.fn.system(cmd)
+  if vim.v.shell_error ~= 0 then
+    print(out)
+  end
   return vim.v.shell_error == 0, out
 end
 

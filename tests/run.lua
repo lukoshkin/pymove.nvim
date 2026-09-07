@@ -16,6 +16,11 @@ if not h.bootstrap() then
   os.exit(1)
 end
 
+print("Neovim " .. tostring(vim.version()))
+print(vim.fn.systemlist({ "python3", "--version" })[1])
+print(vim.fn.systemlist({ "rg", "--version" })[1])
+print("Parser: " .. vim.api.nvim_get_runtime_file("parser/python.*", false)[1])
+
 -- The plugin narrates every move through `vim.notify`, which would bury the
 -- assertions. Set PYMOVE_TEST_VERBOSE=1 to watch it work.
 if not os.getenv "PYMOVE_TEST_VERBOSE" then
@@ -23,7 +28,7 @@ if not os.getenv "PYMOVE_TEST_VERBOSE" then
   require("plenary.log").new({ plugin = "pymove-refactor" }).level = "error"
 end
 
-local specs = { "import_root", "move" }
+local specs = { "import_root", "move", "operation" }
 if #arg > 0 then
   specs = {}
   for _, name in ipairs(arg) do

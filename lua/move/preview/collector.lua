@@ -5,11 +5,6 @@ local imports = require "move.imports"
 
 local M = {}
 
-local log = require("plenary.log").new {
-  plugin = "pymove-preview-collector",
-  use_console = true,
-}
-
 ---Check if a file has an active swap file
 ---@param filepath string File path to check
 ---@return boolean has_swap True if swap file exists
@@ -63,7 +58,8 @@ end
 ---@param project_root string Project root
 ---@param context_lines integer Number of context lines
 ---@param strategy "absolute"|"preserve" How to spell rewritten relative imports
----@return table[] changes
+---@return table[]? changes
+---@return string? error
 function M.process_file_changes(
   file,
   old_dotted,
@@ -86,26 +82,23 @@ function M.process_file_changes(
   vim.o.shortmess = old_shortmess
 
   if not load_success then
-    log.warn("Failed to load buffer for file: " .. file)
-    return changes
+    return nil, "Failed to load buffer for file: " .. file
   end
 
   local success, parser = pcall(vim.treesitter.get_parser, bufnr, "python")
   if not success or not parser then
-    log.warn(
-      "Python treesitter parser unavailable, skipping "
+    return nil,
+      "Python treesitter parser unavailable for "
         .. file
         .. " -- run :TSInstall python to install it"
-    )
-    return changes
   end
 
   local rel_path = filesystem.import_relative_path(project_root, file)
   local ok, matches =
     pcall(imports.find_matches, bufnr, rel_path, old_dotted, new_dotted)
   if not ok then
-    log.warn("Failed to scan imports in " .. file .. ": " .. tostring(matches))
-    return changes
+    return nil,
+      "Failed to scan imports in " .. file .. ": " .. tostring(matches)
   end
   local total_lines = api.nvim_buf_line_count(bufnr)
 
@@ -127,10 +120,24 @@ function M.process_file_changes(
       reason = match.reason,
       aliased_name = match.aliased_name,
       aliased_to = match.aliased_to,
-      full_line = api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
-        or "",
-      context_before = api.nvim_buf_get_lines(bufnr, ctx_start, start_row, false),
-      context_after = api.nvim_buf_get_lines(bufnr, end_row + 1, ctx_end, false),
+      full_line = api.nvim_buf_get_lines(
+        bufnr,
+        start_row,
+        start_row + 1,
+        false
+      )[1] or "",
+      context_before = api.nvim_buf_get_lines(
+        bufnr,
+        ctx_start,
+        start_row,
+        false
+      ),
+      context_after = api.nvim_buf_get_lines(
+        bufnr,
+        end_row + 1,
+        ctx_end,
+        false
+      ),
       status = match.unfixable and "unfixable" or "pending",
       buffer_line = 0,
       node_range = match.node_range,
@@ -164,7 +171,7 @@ function M.collect_changes_async(
 
     for i = current_idx, batch_end do
       local file = files[i]
-      local file_changes = M.process_file_changes(
+      local file_changes, err = M.process_file_changes(
         file,
         old_dotted,
         new_dotted,
@@ -172,6 +179,10 @@ function M.collect_changes_async(
         context_lines,
         strategy
       )
+      if not file_changes then
+        callback(nil, err)
+        return
+      end
       for _, change in ipairs(file_changes) do
         table.insert(changes, change)
       end

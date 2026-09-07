@@ -16,6 +16,8 @@
 ---@field winid integer Preview window ID
 ---@field old_name string Source module path
 ---@field new_name string Destination module path
+---@field old_dotted string Source name resolved at collection time
+---@field new_dotted string Destination name resolved at collection time
 ---@field project_root string Project root directory
 ---@field use_git boolean Whether to use git mv
 ---@field namespace integer Extmark namespace
@@ -36,6 +38,8 @@ local report = require "move.report"
 local state_mod = require "move.preview.state"
 local utils = require "move.utils"
 local window = require "move.preview.window"
+local Path = require "plenary.path"
+local imports = require "move.imports"
 
 local M = {}
 
@@ -65,7 +69,6 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
   end
 
   -- Validate that source exists before showing preview
-  local Path = require "plenary.path"
   local old_path = Path:new(project_root) / old_name
   local new_path = Path:new(project_root) / new_name
 
@@ -91,8 +94,20 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
 
   -- Collect files that might need updates. Dotted names come from each side's
   -- import root, not the filesystem root the paths are given against
-  local names = filesystem.resolve_move_names(project_root, old_name, new_name)
+  local resolved, names =
+    pcall(filesystem.resolve_move_names, project_root, old_name, new_name)
+  if not resolved then
+    vim.notify(tostring(names), vim.log.levels.ERROR)
+    return
+  end
   local old_dotted, new_dotted = names.old_dotted, names.new_dotted
+  local supported, reason =
+    imports.validate_relocation(tostring(old_path), old_dotted, new_dotted)
+  if not supported then
+    ---@cast reason string
+    vim.notify(reason, vim.log.levels.ERROR)
+    return
+  end
   report.warn_rival_spellings(names.rivals, new_dotted)
   local strategy = report.resolve_strategy(
     options.relative_imports or config.options.move.relative_imports,
@@ -100,12 +115,11 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
   )
   local change = utils.estimate_change(old_dotted, new_dotted)
   local pattern = utils.file_change_pattern(change, old_dotted)
-  local all_files =
+  local all_files, search_error =
     refactor.find_files_with_pattern(pattern, project_root, "*.py")
-
-  if #all_files == 0 then
-    log.info "No import changes detected."
-    vim.notify("No imports to update", vim.log.levels.INFO)
+  if not all_files then
+    ---@cast search_error string
+    vim.notify(search_error, vim.log.levels.ERROR)
     return
   end
 
@@ -186,10 +200,7 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
     end
 
     log.warn(
-      string.format(
-        "User chose to proceed despite %d swap files",
-        #swap_files
-      )
+      string.format("User chose to proceed despite %d swap files", #swap_files)
     )
   end
 
@@ -212,16 +223,15 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
         window.update_loading_progress(loading_bufnr, current, total, file)
       end
     end,
-    function(changes)
+    function(changes, collection_error)
       -- Completion callback
       -- Close loading window
       if api.nvim_win_is_valid(loading_winid) then
         api.nvim_win_close(loading_winid, true)
       end
 
-      if #changes == 0 then
-        log.info "No matching imports found."
-        vim.notify("No matching imports found", vim.log.levels.INFO)
+      if not changes then
+        vim.notify(collection_error, vim.log.levels.ERROR)
         return
       end
 
@@ -250,6 +260,8 @@ function M.show_interactive_preview(old_name, new_name, project_root, options)
         old_name = old_name,
         new_name = new_name,
         project_root = project_root,
+        old_dotted = old_dotted,
+        new_dotted = new_dotted,
         use_git = use_git,
         backup = options.backup or false,
         namespace = api.nvim_create_namespace "pymove-preview",

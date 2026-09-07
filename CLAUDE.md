@@ -10,25 +10,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Development Commands
 
-This project uses Python for testing. Use `uv` for package management.
+The implementation and test harness are Lua. CPython checks the rewritten
+fixture projects; no Python dependency installation is needed.
 
 ### Testing
 ```bash
-# Run test file to verify sorting behavior
-uv run python test_sorting.py
-
-# Run specific test file in src/
-uv run python src/test_data.py
+# Full move acceptance suite (Neovim, plenary, Python parser, rg, python3)
+sh tests/run.sh
+# Focused operation regressions
+sh tests/run.sh operation
 ```
 
 ### Code Quality
 ```bash
-# Type checking (mypy strict mode enabled, except for tests)
-uv run mypy lua/  # Note: Primarily Lua, limited Python
-
-# Lint Lua code (if configured)
-uv run ruff check  # For Python test files
+# Lua lint, scoped to the changed Lua files
+luacheck <changed-lua-files> --globals vim --no-max-line-length --no-unused-args
 ```
+
+Use Lua tooling for implementation checks. Ruff and mypy do not check Lua.
 
 ### Plugin Development
 ```bash
@@ -83,17 +82,17 @@ The plugin is organized into three main Lua modules:
 
 **Refactoring Workflow:**
 1. Validate source exists and destination is available
-2. Convert file paths to Python dotted names (e.g., `src/utils.py` → `src.utils`)
+2. Resolve source and destination dotted names from their import roots
 3. Use ripgrep to find all files with matching import patterns
 4. Show interactive preview with per-file diffs
-5. Apply accepted changes: move file (with `git mv` if in repo) + update imports
+5. Check proposed edits before moving, then move and replace each importer's bytes
 6. Display progress bar during bulk import updates
 
 **Preview System:**
 - Creates a custom floating window with syntax highlighting
 - Tracks three states per change: pending → accepted → declined
 - Allows per-file approval/rejection
-- Rewrites accepted import lines in place (no external `patch` binary)
+- Validates accepted spans before moving; stages each importer replacement
 
 ### Dependencies
 
@@ -133,9 +132,10 @@ To add new refactoring patterns:
 
 ### Import Forms Handled
 
-`lua/move/imports.lua` is the single matcher; `lua/move/preview/collector.lua`
-and `update_imports_direct()` both call `find_matches()` rather than carrying
-their own query. It walks `import_statement` / `import_from_statement` fields in
+`lua/move/imports.lua` is the single matcher. Both command paths collect imports
+through `lua/move/preview/collector.lua` before moving the source; the standalone
+`update_imports_direct()` API also calls `find_matches()`. The matcher walks
+`import_statement` / `import_from_statement` fields in
 Lua instead of using a field-constrained query, because the moved module can sit
 in either the `module_name:` or the `name:` field, and `module_name:` holds a
 `relative_import` node for relative imports but a `dotted_name` for absolute
@@ -152,12 +152,24 @@ Handled:
 Matching is on whole dotted components (`utils.rename_dotted_prefix`), so moving
 `src/utils.py` never touches `src.utils_legacy` or `src_utils`.
 
-A relative import whose importer is itself inside the moved subtree is left
-alone. That is correct only when the move keeps the same parent package (a
-rename, or moving a package within its parent), because the target travelled
-with it. It is **wrong** for a cross-package move: after moving `src/utils.py`
-to `other/helpers.py`, a `from .sibling import x` inside it now resolves against
-`other`, not `src`. See the "Not handled" list below.
+A relative import whose importer is inside the moved subtree is left alone only
+when it still reaches the same module from where the importer lands. Asking
+merely whether the importer moves is not enough: `from ..old.util import VALUE`
+inside `pkg/old` climbs out to `pkg` and names the package it just left, so
+renaming `pkg/old` to `pkg/new` strands it even though its target travelled
+along. `imports.lua` therefore resolves the statement twice -- once from the
+importer's current path, once from `importer_destination()` -- and rewrites it
+unless the second resolution equals the renamed first. A new relative spelling
+is likewise computed from the destination, since that is where the file will
+live. Cross-package moves containing relative imports in the
+moved code are refused by `imports.validate_relocation()` before mutation. That
+guard walks the source with `vim.fs.find` rather than `vim.fn.globpath`, whose
+first argument is a comma-separated list of directories -- a comma anywhere in
+the path split the source into two that do not exist, and a guard that finds no
+files permits everything. This
+conservative boundary also rejects inward relative imports that might be safe;
+supporting their transformation is separate work. Source files are checked even
+when importer discovery would not collect them.
 
 **Local bindings are preserved by aliasing.** `from . import utils` binds the
 name `utils`; renaming the module would rebind it and break every `utils.foo()`
@@ -234,7 +246,7 @@ and as a warning listing `file:line` on the non-preview path):
 - A move that lands the module at the import root, where `from X import Y`
   would have to become `import Y`.
 
-**Not handled** (silently skipped, no user warning):
+**Remaining limitations:**
 - `from pkg import module` where `module` itself is the thing being moved and
   `pkg` is a package rather than a relative prefix -- see issue #2. The relative
   form (`from . import module`) *is* handled; `utils.rename_from_import()` is
@@ -248,19 +260,27 @@ and as a warning listing `file:line` on the non-preview path):
 - Vendored trees. `count_spellings()` scans whatever ripgrep walks, and outside
   a git repo a non-hidden `vendor/` or `venv/` is not ignored, so its imports
   vote on the root alongside the project's own.
-- The moved code's own outward relative imports. Moving `src/pkg` to
-  `other/pkg` leaves `from ..util import f` inside it pointing at the old
-  parent, and moving the single module `src/utils.py` to `other/helpers.py`
-  leaves its own `from .sibling import x` pointing at `other.sibling`. These
-  files are usually not even in the ripgrep discovery set, so no warning fires.
+
+**Failure handling:** `move.search` distinguishes no matches from a failed scan
+and passes paths as process arguments. Scoring errors, discovery errors, parser
+failures and invalid direct-command edits stop before moving. Preview validates
+all accepted edits before moving or writing any importer. A stale span refuses
+the whole accepted set. A move with no importers is valid in both paths.
+
+The writer stages each importer beside its destination, checks write/close
+results, preserves permissions, and replaces it with a filesystem rename.
+Failures return an error instead of counting as an update. This is per-file
+replacement, not project-wide rollback: a late failure can leave the source
+moved and other importers updated. Only successful edits enter alias reports.
 
 ### Testing Changes
 
-**Move/import rewriting** has an automated suite -- `nvim -l tests/run.lua`,
+**Move/import rewriting** has an automated suite -- `sh tests/run.sh`,
 exit status 0 only when everything passes. It writes a throwaway Python project
 per case, runs real moves against it, and checks the result by importing the
-rewritten tree with `python3`, which is the only authority on whether a rewrite
-was right. `tests/README.md` explains what each fixture layout is for; the short
+rewritten tree with required `python3`, and exercises selected call sites to
+check preserved bindings. `tests/README.md` defines the acceptance boundary and
+explains what each fixture layout is for; the short
 version is that they are not variety but the specific shapes that broke a
 version of the import-root rules, several of them pairs no rule can separate
 from the directory tree alone.
@@ -285,8 +305,8 @@ The preview system (`lua/move/preview/`) collects changes, then rewrites them in
   candidates already on each change
 - Only accepted changes are applied when user confirms
 - `update_specific_imports_direct()` in `lua/move/refactor.lua` edits the exact `node_range`
-  byte span with Lua file IO, so applying does not depend on `patch(1)`, a writable temp
-  directory, or fuzzy context matching
+  byte span with Lua file IO, stages the replacement beside the importer, and
+  uses a filesystem rename. It does not depend on `patch(1)` or fuzzy matching.
 
 ## Common Workflows
 
@@ -357,12 +377,14 @@ lua/
         ├── keymaps.lua
         └── highlight.lua
 
-tests/               # Move/import test suite (nvim -l tests/run.lua)
+tests/               # Move/import test suite (sh tests/run.sh)
+├── run.sh
 ├── run.lua
 ├── helpers.lua
 ├── fixtures.lua     # Project layouts, one per shape that broke a rule
 ├── import_root_spec.lua
-└── move_spec.lua
+├── move_spec.lua
+└── operation_spec.lua
 
 src/                 # Python test data for sorting
 test_sorting.py      # Test file for sorting

@@ -3,6 +3,7 @@ local Path = require "plenary.path"
 local filesystem = require "move.filesystem"
 local refactor = require "move.refactor"
 local report = require "move.report"
+local imports = require "move.imports"
 
 local M = {}
 
@@ -30,10 +31,13 @@ local function notify_error_and_close(message, state)
   log.error(message)
   vim.notify(message, vim.log.levels.ERROR)
   api.nvim_win_close(state.winid, true)
+  return false, message
 end
 
 ---Apply only accepted changes
 ---@param state table PreviewState
+---@return boolean success
+---@return string? error
 function M.apply_accepted_changes(state)
   local move_operation, import_changes = nil, {}
   for _, change in ipairs(state.changes) do
@@ -53,19 +57,31 @@ function M.apply_accepted_changes(state)
     log.warn "No changes accepted"
     vim.notify("No changes were accepted", vim.log.levels.WARN)
     api.nvim_win_close(state.winid, true)
-    return
+    return false, "No changes were accepted"
   end
 
   local old_path = Path:new(state.project_root) / state.old_name
   local new_path = Path:new(state.project_root) / state.new_name
 
+  local ready, preparation_error = refactor.validate_changes(accepted_imports)
+  if not ready then
+    return notify_error_and_close(preparation_error, state)
+  end
+
   if move_accepted then
+    local supported, reason = imports.validate_relocation(
+      tostring(old_path),
+      state.old_dotted,
+      state.new_dotted
+    )
+    if not supported then
+      return notify_error_and_close(reason, state)
+    end
     if not old_path:exists() then
-      notify_error_and_close(
+      return notify_error_and_close(
         "Error: Source path does not exist:\n" .. tostring(old_path),
         state
       )
-      return
     end
 
     if new_path:exists() then
@@ -78,13 +94,12 @@ function M.apply_accepted_changes(state)
       vim.fn.system(test_cmd)
 
       if vim.v.shell_error ~= 0 then
-        notify_error_and_close(
+        return notify_error_and_close(
           "Error: Destination exists but is not accessible by current user:\n"
             .. state.new_name
             .. "\n\nCheck file permissions or try running with sudo/appropriate permissions.",
           state
         )
-        return
       end
 
       local response = vim.fn.confirm(
@@ -96,7 +111,7 @@ function M.apply_accepted_changes(state)
         log.info "User cancelled move due to existing destination"
         vim.notify("Move cancelled", vim.log.levels.INFO)
         api.nvim_win_close(state.winid, true)
-        return
+        return false, "Move cancelled"
       end
 
       log.info("Removing existing destination: " .. dest_path_str)
@@ -109,18 +124,19 @@ function M.apply_accepted_changes(state)
 
       local rm_output = vim.fn.system(rm_cmd)
       if vim.v.shell_error ~= 0 then
-        notify_error_and_close(
+        return notify_error_and_close(
           "Failed to remove existing destination: "
             .. rm_output
             .. "\n\nYou may need appropriate permissions to overwrite this file.",
           state
         )
-        return
       end
 
       if new_path:exists() then
-        notify_error_and_close("Failed to remove existing destination", state)
-        return
+        return notify_error_and_close(
+          "Failed to remove existing destination",
+          state
+        )
       end
       log.info "Successfully removed existing destination"
     end
@@ -134,13 +150,14 @@ function M.apply_accepted_changes(state)
     if not move_success then
       log.error("Failed to move file/directory: " .. move_err)
       vim.notify("Failed to move: " .. move_err, vim.log.levels.ERROR)
-      return
+      return false, move_err
     end
     log.info(string.format("Moved %s → %s", state.old_name, state.new_name))
   else
     log.info "File move operation declined"
   end
   local updated_files, updated_imports, failed_files = 0, 0, 0
+  local applied_imports = {}
   if #accepted_imports > 0 then
     local old_path_str, new_path_str = tostring(old_path), tostring(new_path)
     local changes_by_file = {}
@@ -168,13 +185,20 @@ function M.apply_accepted_changes(state)
       end
       if num_updates < #file_changes then
         failed_files = failed_files + 1
+      else
+        for _, change in ipairs(file_changes) do
+          table.insert(
+            applied_imports,
+            vim.tbl_extend("force", change, { file = file })
+          )
+        end
       end
     end
 
     -- Files were rewritten on disk; refresh any buffers holding stale copies
     vim.cmd "silent! checktime"
 
-    report.publish_aliases(accepted_imports)
+    report.publish_aliases(applied_imports)
   end
 
   local msg_parts = {}
@@ -204,6 +228,8 @@ function M.apply_accepted_changes(state)
     )
     log.error(failure_msg)
     vim.notify(failure_msg, vim.log.levels.ERROR)
+    api.nvim_win_close(state.winid, true)
+    return false, failure_msg
   else
     local success_msg = "✓ " .. table.concat(msg_parts, " and ")
     log.info(success_msg)
@@ -211,6 +237,7 @@ function M.apply_accepted_changes(state)
   end
 
   api.nvim_win_close(state.winid, true)
+  return true
 end
 
 return M
